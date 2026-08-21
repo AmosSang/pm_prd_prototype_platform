@@ -26,10 +26,10 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    from server.config import PORT, WEB_ORIGIN
-
     # 开发期放开 Vite dev server 的跨域（生产由 Nginx 同域转发，无跨域）
     from flask_cors import CORS
+
+    from server.config import PORT, WEB_ORIGIN
 
     CORS(app, origins=[WEB_ORIGIN])
     app.run(host="0.0.0.0", port=PORT, debug=True)

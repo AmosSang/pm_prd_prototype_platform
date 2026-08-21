@@ -16,3 +16,8 @@ data/
 
 # 编辑器
 .DS_Store
+
+# Playwright
+tests/node_modules/
+tests/playwright-report/
+tests/test-results/

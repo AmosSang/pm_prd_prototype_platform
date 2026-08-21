@@ -1,0 +1,12 @@
+{
+  "name": "ppp-tests",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "smoke": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.46.0"
+  }
+}
