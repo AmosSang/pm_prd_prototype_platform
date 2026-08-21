@@ -22,3 +22,5 @@ tests/node_modules/
 tests/playwright-report/
 tests/test-results/
 web/tsconfig.tsbuildinfo
+web/vite.config.ts.timestamp-*.mjs
+web/vite.config.ts.timestamp-*.mjs
