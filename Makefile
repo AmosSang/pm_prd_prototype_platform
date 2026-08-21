@@ -1,6 +1,12 @@
 PYTHON ?= python3
 
-.PHONY: dev dev-server dev-web check smoke clean
+.PHONY: dev dev-server dev-web check smoke clean help
+
+help:
+	@echo "make dev     一键起开发环境（前后端并行，Ctrl+C 停止）"
+	@echo "make check   lint + 单测/契约测试 + 前端构建检查（全绿才算过）"
+	@echo "make smoke   自动起环境跑 Playwright E2E 后清理"
+	@echo "make clean   清理所有依赖与构建产物"
 
 # 一键起开发环境：前后端在本终端内并行运行，Ctrl+C 一起停止
 dev:
@@ -29,13 +35,22 @@ dev-web:
 		echo "[dev-web] 前端启动在 http://localhost:8080" && \
 		npm run dev
 
-# lint + 单元测试 + 契约测试（T0.2 任务卡实现）
+# ─── 验收命令 ───────────────────────────────────────────────
+# lint + 单元测试 + 契约测试 + 前端类型检查，全绿才算过
 check:
-	@echo "T0.2 将实现：lint + pytest + 契约测试"
+	@echo "═══ [1/4] Python lint (ruff) ═══"
+	@cd server && .venv/bin/ruff check ../server ../tests
+	@echo "═══ [2/4] Python 单元测试 + 契约测试 (pytest) ═══"
+	@cd server && .venv/bin/python -m pytest ../tests -v
+	@echo "═══ [3/4] 前端类型检查 (vue-tsc) ═══"
+	@cd web && npm run build --silent
+	@echo "═══ [4/4] 前端 lint (vue-tsc -b 已含) ═══"
+	@echo ""
+	@echo "✅ check 全绿"
 
-# 端到端冒烟（T0.2 任务卡实现）
+# 端到端冒烟：自动起环境 → 跑 Playwright → 清理
 smoke:
-	@echo "T0.2 将实现：Playwright E2E"
+	@bash tests/run-smoke.sh
 
 clean:
-	@rm -rf server/.venv server/__pycache__ web/node_modules web/dist
+	@rm -rf server/.venv server/__pycache__ web/node_modules web/dist tests/node_modules tests/playwright-report tests/test-results
