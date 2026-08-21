@@ -63,8 +63,16 @@
    * 而沙箱文档内创建的任何嵌套 iframe 都继承 sandbox 标志（不透明 origin），
    * contentDocument 读取必然被浏览器拦截（包括 about:blank 与 srcdoc）。
    * 绕法：把 context.sandbox 替换为 { contentWindow: null } 假对象——
-   * 库对 sandboxWindow 判空后返回空样式表（正常分支，不抛异常），
-   * 代价是 diff 样式包含少量浏览器默认值，视觉影响可忽略。
+   * 库对 sandboxWindow 判空后返回空样式表（正常分支，不抛异常）。
+   *
+   * 绕法的副作用与修正（红框偏移 bug，2026-08-21）：
+   * 默认样式表被置空后，库的 applyCssStyleWithOptions 会用 !important
+   * 强制克隆 body 的 width/height = 画布尺寸（scrollWidth/scrollHeight）。
+   * body margin=0 时两者恰好一致；margin≠0 时真实 body 宽 = 视口宽−margin，
+   * 克隆却拉满画布宽 → flex 居中等布局整体错位（实测 margin 20px 16px 时
+   * 内容偏 (+16,+20)），红框坐标按真实文档算 → 相对偏移。
+   * 修正：onCloneNode 把克隆 body 的 margin/width/height 写回真实计算值
+   * （onCloneNode 在 applyCssStyleWithOptions 之后执行，important 可覆盖）。
    */
   function captureFullPage(targetEl) {
     return loadScreenshotLib().then(function (mod) {
@@ -82,6 +90,18 @@
         .then(function (context) {
           // 假 sandbox：短路 getDefaultStyle 的 iframe 依赖（见头注）
           context.sandbox = { contentWindow: null }
+          // 红框偏移修正：三件套写回（margin + width + height），
+          // 见头注——只写 margin 不够，width/height 被库强制为画布尺寸也会错位
+          var cs = window.getComputedStyle(document.body)
+          var realMargin =
+            cs.marginTop + ' ' + cs.marginRight + ' ' + cs.marginBottom + ' ' + cs.marginLeft
+          context.onCloneNode = function (clone) {
+            if (clone && clone.nodeName === 'BODY') {
+              clone.style.setProperty('margin', realMargin, 'important')
+              clone.style.setProperty('width', cs.width, 'important')
+              clone.style.setProperty('height', cs.height, 'important')
+            }
+          }
           // domToBlob(context) 接受 context 对象（isContext 判定后直接用）
           return mod.domToBlob(context)
         })
