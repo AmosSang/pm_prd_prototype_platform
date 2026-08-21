@@ -10,6 +10,11 @@ const router = createRouter({
       name: 'bridge-demo',
       component: () => import('../views/BridgeDemo.vue'),
     },
+    {
+      path: '/demo/shot',
+      name: 'shot-demo',
+      component: () => import('../views/ShotDemo.vue'),
+    },
   ],
 })
 

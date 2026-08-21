@@ -35,6 +35,7 @@ CONTENT_TYPES = {
     ".woff": "font/woff",
     ".woff2": "font/woff2",
     ".ttf": "font/ttf",
+    ".mjs": "application/javascript; charset=utf-8",
 }
 
 
@@ -76,6 +77,28 @@ def bridge_js() -> Response:
     path = os.path.join(PLATFORM_DIR, "bridge", "bridge.js")
     with open(path, encoding="utf-8") as f:
         return Response(f.read(), mimetype="application/javascript; charset=utf-8")
+
+
+@bp.get("/vendor/<filename>")
+def vendor_file(filename: str) -> Response:
+    """平台自托管的第三方库（modern-screenshot 等），供 bridge 在 iframe 内加载。
+
+    注意：sandbox 不透明 origin 下的 ES Module 动态 import 属跨域 fetch
+    （Origin: null），必须返回 CORS 头，否则浏览器静默拒绝加载。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename) or ".." in filename:
+        abort(404)
+    path = os.path.join(PLATFORM_DIR, "bridge", "vendor", filename)
+    if not os.path.isfile(path):
+        abort(404)
+    ctype = CONTENT_TYPES.get(os.path.splitext(filename)[1].lower())
+    if not ctype:
+        abort(404)
+    with open(path, "rb") as f:
+        resp = Response(f.read(), mimetype=ctype)
+        # 模块内容为平台内置可信库，放行 null origin（沙箱 iframe）
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
 
 @bp.get("/proto/<project_id>/<path:rel_path>")

@@ -8,12 +8,14 @@ from flask import Flask, jsonify
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.proto_proxy import bp as proto_proxy_bp
+from server.shots import bp as shots_bp
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
 
     app.register_blueprint(proto_proxy_bp)
+    app.register_blueprint(shots_bp)
 
     @app.get("/api/health")
     def health():
