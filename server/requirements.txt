@@ -1,0 +1,8 @@
+flask==3.0.3
+flask-cors==4.0.1
+peewee==3.17.6
+cryptography==42.0.8
+GitPython==3.1.43
+beautifulsoup4==4.12.3
+Pillow==10.4.0
+pytest==8.3.2

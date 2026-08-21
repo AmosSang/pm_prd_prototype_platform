@@ -1,0 +1,19 @@
+services:
+  server:
+    build:
+      context: ./server
+    environment:
+      - PLATFORM_SECRET=${PLATFORM_SECRET:-dev-secret-change-me}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-25}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - DATA_DIR=/data
+    ports:
+      - "8081:8081"
+    volumes:
+      - server-data:/data
+    restart: unless-stopped
+
+volumes:
+  server-data:
