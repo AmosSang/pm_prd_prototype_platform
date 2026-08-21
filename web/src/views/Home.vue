@@ -18,6 +18,7 @@ onMounted(async () => {
   <main class="hello">
     <h1>产品方案展示平台</h1>
     <p><router-link to="/demo/bridge">T1.1 沙箱桥接 Demo →</router-link></p>
+    <p><router-link to="/demo/shot">T1.2 截图链路 Demo →</router-link></p>
     <p>
       后端连接状态：
       <span :class="backendStatus">{{ backendStatus === 'ok' ? '正常' : backendStatus === 'checking' ? '检测中…' : '异常' }}</span>
