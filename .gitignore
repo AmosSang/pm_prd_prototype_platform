@@ -21,3 +21,4 @@ data/
 tests/node_modules/
 tests/playwright-report/
 tests/test-results/
+web/tsconfig.tsbuildinfo
