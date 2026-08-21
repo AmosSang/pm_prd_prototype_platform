@@ -22,6 +22,10 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
+    # 直接运行时把 platform/ 加入 sys.path，使 `server.config` 可导入
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
     from server.config import PORT, WEB_ORIGIN
 
     # 开发期放开 Vite dev server 的跨域（生产由 Nginx 同域转发，无跨域）
