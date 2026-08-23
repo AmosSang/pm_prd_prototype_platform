@@ -24,6 +24,20 @@ def create_app() -> Flask:
 
     init_tables()
 
+    # T2.2：API 登录拦截。放行：/api/auth/*、/api/health；
+    # 非 /api/ 前缀（/proto/*、/vendor/*、静态资源）放行——原型 iframe 走沙箱隔离，
+    # 页面数据接口才需要登录态。
+    @app.before_request
+    def require_login():
+        from flask import request, session
+
+        p = request.path
+        if p.startswith("/api/auth/") or p == "/api/health" or not p.startswith("/api/"):
+            return None
+        if not session.get("uid"):
+            return jsonify(code=401, msg="未登录"), 401
+        return None
+
     @app.get("/api/health")
     def health():
         return jsonify(code=0, data={"status": "ok", "service": "server"}), 200
