@@ -15,8 +15,9 @@ port_in_use() {
 cleanup() {
   if [ "$STARTED_BY_SCRIPT" -eq 1 ]; then
     echo "[smoke] 清理脚本启动的服务..."
-    for pid in $SERVER_PID $WEB_PID; do
-      kill "$pid" 2>/dev/null || true
+    # set -u 下未定义变量会炸 cleanup；用默认空值兜底
+    for pid in ${SERVER_PID:-} ${WEB_PID:-}; do
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
   else

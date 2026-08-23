@@ -7,6 +7,9 @@ from flask import Flask, jsonify
 # 支持 `python app.py` 直接运行（platform/ 根加入 sys.path）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from server.auth import apply_auth_to_app
+from server.auth import bp as auth_bp
+from server.models import init_tables
 from server.proto_proxy import bp as proto_proxy_bp
 from server.shots import bp as shots_bp
 
@@ -14,8 +17,12 @@ from server.shots import bp as shots_bp
 def create_app() -> Flask:
     app = Flask(__name__)
 
+    apply_auth_to_app(app)
+    app.register_blueprint(auth_bp)
     app.register_blueprint(proto_proxy_bp)
     app.register_blueprint(shots_bp)
+
+    init_tables()
 
     @app.get("/api/health")
     def health():
