@@ -1,10 +1,21 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 const PROTO_ORIGIN = 'http://localhost:8081'
-const DEMO_PAGE = '/proto/demo/prototype/pages/login.html'
-// T1.2 演示目标：验证码输入框（带 data-pa="login-captcha"）
-const TARGET_CSS = '#captcha'
+// T1.3 三场景：登录页（基础）/ modal（带弹窗）/ scroll（长页滚动）
+const SCENARIOS: Record<string, { page: string; target: string; label: string }> = {
+  login: { page: '/proto/demo/prototype/pages/login.html', target: '#captcha', label: '登录页（基础）' },
+  modal: { page: '/proto/demo/prototype/pages/modal.html', target: '#confirm-delete', label: '账号设置（带弹窗）' },
+  scroll: { page: '/proto/demo/prototype/pages/scroll.html', target: '#remark', label: '个人资料（长页滚动）' },
+}
+
+const route = useRoute()
+const sceneKey = computed(() => {
+  const q = String(route.query.scene ?? 'login')
+  return q in SCENARIOS ? q : 'login'
+})
+const scene = computed(() => SCENARIOS[sceneKey.value])
 
 function makeNonce(): string {
   const bytes = new Uint8Array(16)
@@ -13,7 +24,7 @@ function makeNonce(): string {
 }
 
 const nonce = makeNonce()
-const iframeSrc = ref(`${PROTO_ORIGIN}${DEMO_PAGE}#pp-nonce=${nonce}`)
+const iframeSrc = computed(() => `${PROTO_ORIGIN}${scene.value.page}#pp-nonce=${nonce}`)
 
 const ready = ref(false)
 const busy = ref(false)
@@ -59,7 +70,7 @@ async function takeScreenshot() {
     const result = await new Promise<any>((resolve, reject) => {
       pending = { id, resolve, reject }
       frame.contentWindow?.postMessage(
-        { type: 'TAKE_SCREENSHOT', nonce, requestId: id, cssPath: TARGET_CSS },
+        { type: 'TAKE_SCREENSHOT', nonce, requestId: id, cssPath: scene.value.target },
         '*',
       )
       setTimeout(() => {
@@ -91,14 +102,29 @@ async function takeScreenshot() {
 
 onMounted(() => window.addEventListener('message', onMessage))
 onBeforeUnmount(() => window.removeEventListener('message', onMessage))
+
+// 场景切换：iframe src 变化 → 重置状态等新页面的 READY
+watch(sceneKey, () => {
+  ready.value = false
+  busy.value = false
+  shotUrl.value = ''
+  shotInfo.value = ''
+  errorMsg.value = ''
+})
 </script>
 
 <template>
   <main class="shot-demo">
     <h1>T1.2 截图链路 Demo</h1>
     <p class="meta">
-      目标元素：验证码输入框（#captcha） ·
+      场景：{{ scene.label }} · 目标元素：{{ scene.target }} ·
       READY：{{ ready ? '✅' : '⏳' }}
+    </p>
+    <p class="scene-switch">
+      <router-link
+        v-for="(s, k) in SCENARIOS" :key="k"
+        :to="{ path: '/demo/shot', query: { scene: k } }"
+        class="scene-link" :class="{ active: k === sceneKey }">{{ s.label }}</router-link>
     </p>
 
     <div class="stage">
@@ -109,7 +135,7 @@ onBeforeUnmount(() => window.removeEventListener('message', onMessage))
             {{ busy ? '截图中…' : '截图（整页+红框）' }}
           </button>
         </div>
-        <iframe id="proto-frame" :src="iframeSrc"
+        <iframe id="proto-frame" :key="sceneKey" :src="iframeSrc"
           sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
           data-testid="proto-frame" />
       </div>
@@ -146,4 +172,7 @@ iframe { flex: 1; width: 100%; border: 0; background: #f5f6f8; }
 .info { color: #666; font-size: 12px; }
 .empty { color: #bbb; font-size: 13px; }
 .logs { list-style: none; padding: 8px 12px; font-size: 12px; font-family: monospace; border: 1px solid #eee; border-radius: 6px; margin-top: 16px; }
+.scene-switch { display: flex; gap: 8px; margin: 8px 0 0; }
+.scene-link { padding: 4px 12px; border: 1px solid #d9d9d9; border-radius: 14px; font-size: 13px; color: #555; text-decoration: none; }
+.scene-link.active { border-color: #2b5cff; color: #2b5cff; background: #f0f4ff; }
 </style>

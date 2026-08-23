@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>个人资料 · 演示原型（长页滚动）</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #333; }
+    .page { max-width: 560px; margin: 0 auto; padding: 24px 16px 48px; }
+    h2 { font-size: 18px; }
+    .card { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px; min-height: 260px; }
+    .card h3 { margin: 0 0 14px; font-size: 15px; }
+    label { display: block; font-size: 13px; color: #666; margin: 12px 0 4px; }
+    input, select, textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 13px; }
+    textarea { min-height: 96px; resize: vertical; }
+  </style>
+</head>
+<body>
+  <!-- fixture：长滚动表单页（POC 场景三：滚动补偿验证，目标元素在折叠线以下） -->
+  <main class="page" data-pa="page-profile">
+    <h2>个人资料</h2>
+    <div class="card" data-pa="profile-basic">
+      <h3>基本信息</h3>
+      <label for="name">姓名</label><input id="name" data-pa="profile-name">
+      <label for="phone">手机号</label><input id="phone" data-pa="profile-phone">
+      <label for="email">邮箱</label><input id="email" data-pa="profile-email">
+    </div>
+    <div class="card" data-pa="profile-edu">
+      <h3>教育经历</h3>
+      <label for="school">学校</label><input id="school" data-pa="profile-school">
+      <label for="major">专业</label><input id="major" data-pa="profile-major">
+      <label for="degree">学历</label>
+      <select id="degree" data-pa="profile-degree"><option>本科</option><option>硕士</option></select>
+    </div>
+    <div class="card" data-pa="profile-work">
+      <h3>工作经历</h3>
+      <label for="company">公司</label><input id="company" data-pa="profile-company">
+      <label for="title">职位</label><input id="title" data-pa="profile-title">
+      <label for="years">工作年限</label><input id="years" data-pa="profile-years">
+    </div>
+    <div class="card" data-pa="profile-remark">
+      <h3>其他</h3>
+      <label for="remark">备注</label>
+      <textarea id="remark" data-pa="profile-remark-input" placeholder="补充说明…"></textarea>
+    </div>
+  </main>
+</body>
+</html>
