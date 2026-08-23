@@ -14,7 +14,8 @@ export const authChecked = ref(false)
 /** 应用启动时调用：拉取当前登录用户（401 时视为未登录）。 */
 export async function initAuth() {
   try {
-    currentUser.value = await api.get('/api/auth/me')
+    const data = await api.get<{ user: CurrentUser }>('/api/auth/me')
+    currentUser.value = data.user
   } catch {
     currentUser.value = null
   } finally {

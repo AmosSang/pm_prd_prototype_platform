@@ -48,6 +48,30 @@ test.describe('T2.2 登录与拦截', () => {
     await expect(page).toHaveURL(/\/demo\/shot/)
   })
 
+  test('登录后刷新/重开浏览器 → 登录态恢复，顶栏用户信息完整', async ({ page }) => {
+    // 回归：/api/auth/me 返回 {user:{...}} 外层包装，initAuth 误把外层对象当用户，
+    // 导致刷新后顶栏显示「（）」。此用例锁住该场景。
+    const email = 'e2e-reload@test.local'
+    await page.goto('/login')
+    await page.fill('[data-testid="login-email"]', email)
+    await page.click('[data-testid="login-send"]')
+    await expect(page.getByText('验证码已发送')).toBeVisible({ timeout: 10_000 })
+
+    const code = readCodeFromMailbox(email)
+    await page.fill('[data-testid="login-code"]', code)
+    await page.click('[data-testid="login-submit"]')
+    await expect(page.getByTestId('current-user')).toBeVisible({ timeout: 10_000 })
+
+    // 模拟关闭浏览器重进：刷新页面，登录态从 /api/auth/me 恢复
+    await page.reload()
+    await expect(page.getByTestId('current-user')).toHaveText(
+      `刷新恢复测试员（${email}）`,
+      { timeout: 10_000 },
+    )
+    // 不应被误判为未登录而弹回登录页
+    await expect(page).not.toHaveURL(/\/login/)
+  })
+
   test('60s 频控 UI：发送后按钮进入倒计时', async ({ page }) => {
     const email = 'e2e-rate@test.local'
     await page.goto('/login')

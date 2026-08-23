@@ -39,18 +39,19 @@ rm -rf /tmp/ppp-fake-mailbox
 (cd server && SMTP_FAKE=1 .venv/bin/python app.py > /tmp/ppp-smoke-server.log 2>&1) &
 SERVER_PID=$!
 
-# 测试用户（幂等）+ 清频控残留（60s 频控会让 E2E 登录 429；sys.path 必须指 platform/ 根）
-(cd server && .venv/bin/python -m server.cli user-add e2e@test.local E2E测试员 >/dev/null 2>&1 || true)
-(cd server && .venv/bin/python -m server.cli user-add e2e-flow@test.local 登录流测试员 >/dev/null 2>&1 || true)
-(cd server && .venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试员 >/dev/null 2>&1 || true)
+# 测试用户（幂等）+ 清频控残留（60s 频控会让 E2E 登录 429）
+# 注意：必须在 platform/ 根执行 -m server.cli（server 包在根下；cd server 会 ModuleNotFoundError）
+server/.venv/bin/python -m server.cli user-add e2e@test.local E2E测试员 >/dev/null 2>&1 || true
+server/.venv/bin/python -m server.cli user-add e2e-flow@test.local 登录流测试员 >/dev/null 2>&1 || true
+server/.venv/bin/python -m server.cli user-add e2e-reload@test.local 刷新恢复测试员 >/dev/null 2>&1 || true
+server/.venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试员 >/dev/null 2>&1 || true
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" 2>/dev/null || true
-(cd server && .venv/bin/python -c "
-import sys, os; sys.path.insert(0, os.path.dirname(os.getcwd()))
+server/.venv/bin/python -c "
 from server.models import VerificationCode, init_tables
 init_tables()
-n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-rate@test.local']).execute()
+n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
-") || true
+" || true
 
 echo "[smoke] 启动前端..."
 (cd web && [ -d node_modules ] || npm install --no-fund --no-audit --silent)
