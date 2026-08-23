@@ -25,7 +25,8 @@ dev-server:
 		echo "[dev-server] 安装依赖..." && \
 		.venv/bin/pip install -q -r requirements.txt && \
 		echo "[dev-server] 后端启动在 http://localhost:8081" && \
-		.venv/bin/python app.py
+		echo "[dev-server] SMTP_FAKE=1（验证码写入 /tmp/ppp-fake-mailbox/，真实 SMTP 由 compose 部署启用）" && \
+		SMTP_FAKE=1 .venv/bin/python app.py
 
 dev-web:
 	@cd web && \

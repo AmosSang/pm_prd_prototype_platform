@@ -8,7 +8,9 @@
 - 登录态：Flask session（签名 cookie），HttpOnly + SameSite=Lax，30 天
 """
 import datetime as dt
+import os
 import random
+import re
 import smtplib
 from email.mime.text import MIMEText
 
@@ -16,6 +18,11 @@ from flask import Blueprint, jsonify, request, session
 
 from server.config import PLATFORM_SECRET, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER
 from server.models import User, VerificationCode, parse_utc, utcnow_str
+
+
+def email_file_name(email: str) -> str:
+    """邮箱 → 安全文件名（FAKE mailbox 用）。"""
+    return re.sub(r"[^a-z0-9@.-]", "_", email.lower())
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -29,11 +36,28 @@ bp.session_ttl_days = SESSION_TTL_DAYS
 
 
 def _smtp_ready() -> bool:
+    # SMTP_FAKE=1：E2E 测试模式，不依赖真实 SMTP（码写入 /tmp/ppp-fake-mailbox/）
+    if os.environ.get("SMTP_FAKE") == "1":
+        return True
     return bool(SMTP_HOST)
 
 
+FAKE_MAILBOX_DIR = "/tmp/ppp-fake-mailbox"
+
+
 def _send_code_email(to_email: str, code: str) -> None:
-    """同步发送验证码邮件。失败抛异常，由调用方转 502。"""
+    """同步发送验证码邮件。失败抛异常，由调用方转 502。
+
+    SMTP_FAKE=1 时不走 SMTP，码写入 /tmp/ppp-fake-mailbox/<email>.txt
+    （E2E 从这里取码走真实 verify 流程）。
+    """
+    if os.environ.get("SMTP_FAKE") == "1":
+        os.makedirs(FAKE_MAILBOX_DIR, exist_ok=True)
+        safe = email_file_name(to_email)
+        with open(os.path.join(FAKE_MAILBOX_DIR, safe), "w", encoding="utf-8") as f:
+            f.write(f"To: {to_email}\nSubject: 登录验证码\n\n{code}\n")
+        return
+
     subject = "产品方案展示平台 · 登录验证码"
     body = (
         f"你的登录验证码是：{code}\n\n"
