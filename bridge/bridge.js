@@ -5,6 +5,8 @@
  * T1.2：TAKE_SCREENSHOT 整页截图（modern-screenshot，沙箱兼容）+ Blob 回传 + highlight_rect 计算
  * T3.1：锚点体系正向链路——[data-pa] 扫描上报（ANCHOR_REPORT）+ hover 锚点 icon（◈）
  *        + 点击 icon 发 ANCHOR_CLICK（宿主侧滚动右侧文档并高亮 2s）
+ * T3.2：反向联动——HIGHLIGHT_ANCHOR（宿主点文档「定位」→ 滚动到锚点元素
+ *        + outline 脉冲闪烁 3 次；锚点不在本页时由宿主先切页再发）
  *
  * 认证机制：sandbox（无 allow-same-origin）下 iframe origin 为不透明 "null"，
  * 无法按 origin 校验。采用 URL nonce：宿主在 iframe src 的 hash 中携带随机
@@ -403,6 +405,51 @@
   )
   window.addEventListener('resize', hideIcon)
 
+  // ─── 反向联动（T3.2）：HIGHLIGHT_ANCHOR ─────────────────────
+  // 宿主点文档「定位」按钮 → 本页滚动到锚点元素 + outline 脉冲闪烁 3 次。
+  // 锚点不在本页时宿主先切 iframe src（等 READY）再发，本侧无需处理跨页。
+  var HIGHLIGHT_CLASS = 'pp-anchor-flash'
+  var highlightStyleEl = null
+
+  function ensureHighlightStyle() {
+    if (highlightStyleEl) return
+    highlightStyleEl = document.createElement('style')
+    // 闪烁：outline 脉冲 3 次（0.4s/次），结束后移除 class 恢复原样。
+    // 用 box-shadow 双层描边模拟 outline 偏移——元素紧贴视口边缘时
+    // outline 超界不显示，box-shadow 同层渲染更稳。
+    highlightStyleEl.textContent =
+      '@keyframes pp-anchor-flash {' +
+      '0%{box-shadow:0 0 0 0 rgba(43,92,255,.9);}' +
+      '50%{box-shadow:0 0 0 6px rgba(43,92,255,.45);}' +
+      '100%{box-shadow:0 0 0 0 rgba(43,92,255,.9);}}' +
+      '.' + HIGHLIGHT_CLASS + '{animation:pp-anchor-flash .4s ease-in-out 3;}'
+    document.head.appendChild(highlightStyleEl)
+  }
+
+  function highlightAnchor(anchorId) {
+    if (!anchorId) return false
+    var el = document.querySelector('[data-pa="' + anchorId + '"]')
+    if (!el) return false
+    ensureHighlightStyle()
+    // 滚动到视口中部（平滑），再闪烁
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    } catch (e) {
+      el.scrollIntoView() // 旧浏览器兜底
+    }
+    // 重触发动画：先移除再强制 reflow 再加回
+    el.classList.remove(HIGHLIGHT_CLASS)
+    // eslint-disable-next-line no-unused-expressions
+    void el.offsetWidth
+    el.classList.add(HIGHLIGHT_CLASS)
+    // 动画结束（3 次 × 0.4s = 1.2s，留 200ms 余量）后清理 class
+    clearTimeout(el.__ppFlashTimer)
+    el.__ppFlashTimer = setTimeout(function () {
+      el.classList.remove(HIGHLIGHT_CLASS)
+    }, 1600)
+    return true
+  }
+
   // ─── 消息分发 ───────────────────────────────────────────────
 
   // 宿主 → iframe：来源 origin 与 referrer 一致 + nonce 匹配才接受
@@ -414,6 +461,11 @@
 
     if (msg.type === 'PING') {
       send('ECHO', { echo: 'pong-' + msg.nonce, page: window.location.pathname })
+    } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
+      // 反向联动（T3.2）：false 表示本页没有该锚点（正常不会发生——
+      // 宿主已按页面地图切页；万一落空回 ACK 让宿主 toast 提示）
+      var hit = highlightAnchor(msg.anchorId)
+      send('HIGHLIGHT_ACK', { anchorId: msg.anchorId, hit: hit })
     } else if (msg.type === 'TAKE_SCREENSHOT') {
       var target = msg.cssPath ? queryTarget(msg.cssPath) : null
       captureFullPage(target)

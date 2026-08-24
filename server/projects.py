@@ -19,6 +19,7 @@ from server.config import DEMO_REPO_DIR
 from server.crypto_util import encrypt_token
 from server.gitops import CloneError, clone_project, pull_project, repo_path
 from server.models import Project, utcnow_str
+from server.page_map import parse_repo_page_map, scan_proto_anchors
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
@@ -175,6 +176,20 @@ def _list_proto_entries(root: str) -> list[str]:
     return entries
 
 
+def _list_all_proto_html(root: str) -> list[str]:
+    """列出 prototype/ 子树全部 HTML（锚点扫描用，含深层目录与子页）。"""
+    proto_dir = os.path.join(root, "prototype")
+    out: list[str] = []
+    if not os.path.isdir(proto_dir):
+        return out
+    for dirpath, _dirnames, filenames in os.walk(proto_dir):
+        for fn in sorted(filenames):
+            if fn.lower().endswith(".html"):
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                out.append(rel.replace(os.sep, "/"))
+    return out
+
+
 @bp.get("/<int:pid>/overview")
 def overview(pid: int):
     p = Project.get_or_none(Project.id == pid)
@@ -183,12 +198,26 @@ def overview(pid: int):
     root = _repo_root(p)
     if not os.path.isdir(root):
         return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
+
+    docs = _list_md_files(root)
+
+    def _read_doc(rel: str) -> str:
+        full = os.path.realpath(os.path.join(root, *rel.split("/")))
+        with open(full, encoding="utf-8") as f:
+            return f.read()
+
+    # 反向联动锚点索引：原型 HTML 中的 data-pa → 文件（组件锚点查文件用）
+    proto_index = scan_proto_anchors(_list_all_proto_html(root), _read_doc)
+
     return jsonify(code=0, data={
         "project": _project_public(p),
-        "docs": _list_md_files(root),
+        "docs": docs,
         "proto_entries": _list_proto_entries(root),
-        # T3.x 起填充：页面地图 + 对账摘要
-        "page_map": [],
+        # T3.2：页面地图（PRD 第 4 章表格）→ 反向联动查目标原型文件
+        "page_map": parse_repo_page_map(docs, _read_doc),
+        # T3.2：锚点 → 原型文件索引（页面地图只登记页面锚点，组件锚点靠本索引）
+        "proto_anchor_index": proto_index,
+        # T3.3 起填充：对账摘要
         "reconcile_summary": None,
     }), 200
 

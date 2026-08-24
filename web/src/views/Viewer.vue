@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
 import { getOverview, getPrd, listProjects, type ProjectOverview } from '../projects'
 
 /**
- * T2.4 分屏查看器骨架 + T3.1 锚点正向联动。
+ * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动。
  * 左：原型 iframe（:8081 独立 origin + sandbox + URL nonce，bridge.js 由代理注入）
  * 右：PRD markdown 渲染（markdown-it + 锚点插件，多文档 el-select 切换）
  * 中：可拖动分割条（pointer 事件，父级相对宽度）
  *
  * T3.1 正向联动：bridge 上报 ANCHOR_CLICK（点原型锚点 icon ◈）→
  * 右侧 [data-pa] 元素 scrollIntoView + 高亮 2s（anchor-highlight class）。
- * 反向联动（文档→原型）与跨页定位是 T3.2 范围。
+ * T3.2 反向联动：文档段落 hover「定位」按钮 → 查页面地图（锚点 → 原型文件）
+ * → 跨页先切 iframe src（等 READY）→ 发 HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
+ * 跨文档：锚点不在当前文档时切文档再定位（正向反向共用）。
  */
 
 const route = useRoute()
@@ -52,41 +54,144 @@ function onMessage(event: MessageEvent) {
   const msg = event.data || {}
   if (event.origin !== PROTO_ORIGIN && event.origin !== 'null') return
   if (msg.nonce !== nonce) return
-  if (msg.type === 'READY') ready.value = true
+  if (msg.type === 'READY') {
+    ready.value = true
+    // 跨页定位：切页后等 READY 再发 HIGHLIGHT_ANCHOR（技术方案 §2.5）
+    if (pendingHighlight.value) {
+      const anchorId = pendingHighlight.value
+      pendingHighlight.value = ''
+      postHighlight(anchorId)
+    }
+  }
   if (msg.type === 'ANCHOR_REPORT' && Array.isArray(msg.anchors)) {
     anchorCount.value = msg.anchors.length
   }
   if (msg.type === 'ANCHOR_CLICK' && typeof msg.anchorId === 'string') {
     jumpToDocAnchor(msg.anchorId)
   }
+  if (msg.type === 'HIGHLIGHT_ACK' && msg.hit === false) {
+    ElMessage.info(`锚点「${msg.anchorId}」在原型中缺失`)
+  }
 }
 
-// ───────────────────────── T3.1 正向联动 ─────────────────────────
-// 点原型锚点 icon → 右侧文档滚动到 [data-pa=id] 段落 + 高亮 2s。
-// 跨文档锚点（当前文档未命中时切文档再定位）留 T3.2，与反向跨页一起做。
+// ───────────────────────── 锚点联动（T3.1 正向 / T3.2 反向）─────────────
+// 正向：点原型锚点 icon → 右侧文档滚动到 [data-pa=id] 段落 + 高亮 2s。
+// 反向：点文档「定位」→ 查页面地图 → 跨页先切 iframe（等 READY）→ 发
+// HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
 let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
-function jumpToDocAnchor(anchorId: string) {
+/** 文档容器内查锚点元素（当前已渲染的文档）。 */
+function findDocAnchor(anchorId: string): HTMLElement | null {
   const container = document.querySelector<HTMLElement>('[data-testid="prd-content"]')
-  const el = container?.querySelector<HTMLElement>(`[data-pa="${cssEscape(anchorId)}"]`) || null
+  return container?.querySelector<HTMLElement>(`[data-pa="${cssEscape(anchorId)}"]`) || null
+}
 
-  if (!el) {
-    ElMessage.info(`锚点「${anchorId}」在当前文档中未找到（跨文档联动即将支持）`)
-    return
-  }
-
-  // 滚动定位（文档区滚动容器内平滑滚动）
+/** 正向联动：滚动 + 高亮当前文档的锚点元素。 */
+function flashDocAnchor(el: HTMLElement) {
   el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  // 高亮 2s：先清旧 timer/class，再加新 class
   if (highlightTimer) clearTimeout(highlightTimer)
   document.querySelectorAll('.anchor-highlight').forEach((n) => n.classList.remove('anchor-highlight'))
   el.classList.add('anchor-highlight')
   highlightTimer = setTimeout(() => el.classList.remove('anchor-highlight'), 2000)
 }
 
+/** 正向联动入口（ANCHOR_CLICK）。当前文档未命中 → 跨文档切换后定位。 */
+async function jumpToDocAnchor(anchorId: string) {
+  const el = findDocAnchor(anchorId)
+  if (el) {
+    flashDocAnchor(el)
+    return
+  }
+  // 跨文档：扫所有文档找含该锚点注释的（API 拉原文正则匹配）
+  if (!overview.value) return
+  for (const doc of overview.value.docs) {
+    if (doc === currentDoc.value) continue
+    try {
+      const res = await getPrd(overview.value.project.id, doc)
+      if (new RegExp(`<!--\\s*pa:\\s*${anchorId}\\s*-->`).test(res.content)) {
+        currentDoc.value = doc
+        // 等 watch 触发的 loadDoc 完成渲染后再定位（下一轮微任务+重绘）
+        await nextTick()
+        await new Promise((r) => setTimeout(r, 50))
+        const target = findDocAnchor(anchorId)
+        if (target) flashDocAnchor(target)
+        return
+      }
+    } catch {
+      /* 单个文档拉取失败继续找下一个 */
+    }
+  }
+  ElMessage.info(`锚点「${anchorId}」在文档中未找到`)
+}
+
 /** CSS.escape 兜底（锚点 ID 契约是 kebab-case，正常不会需要转义） */
 function cssEscape(s: string): string {
   return window.CSS && CSS.escape ? CSS.escape(s) : s
+}
+
+// ───────────────────────── T3.2 反向联动 ─────────────────────────
+// 文档段落 hover「定位」按钮 → 原型侧滚动闪烁。跨页：查页面地图（页面锚点
+// → 原型文件）先切 iframe src，等 READY 后发 HIGHLIGHT_ANCHOR。
+const pendingHighlight = ref('')
+
+function postHighlight(anchorId: string) {
+  // targetOrigin '*'：sandbox iframe（无 allow-same-origin）的 origin 是
+  // 不透明 "null"，指定具体 origin 会被浏览器拒发。安全靠 bridge 侧
+  // origin + nonce 双重校验（技术方案 §2.2，与反向消息同规约）
+  iframeEl.value?.contentWindow?.postMessage(
+    { type: 'HIGHLIGHT_ANCHOR', anchorId, nonce },
+    '*',
+  )
+}
+
+/** 反向联动入口：文档「定位」按钮点击。 */
+function locateAnchor(anchorId: string) {
+  if (!overview.value) return
+  // 目标原型文件三级查找：页面地图（页面锚点）→ 锚点索引（组件锚点）→ 当前页
+  const mapHit = overview.value.page_map.find((e) => e.anchor === anchorId)
+  const indexHit = overview.value.proto_anchor_index[anchorId]
+  const targetEntry = mapHit?.proto || indexHit || currentEntry.value
+  if (!targetEntry) {
+    ElMessage.info('仓库内未发现原型页面')
+    return
+  }
+  if (targetEntry !== currentEntry.value) {
+    // 跨页：切 src（iframe 重载 → bridge READY → onMessage 里补发定位）
+    pendingHighlight.value = anchorId
+    ready.value = false
+    currentEntry.value = targetEntry
+  } else {
+    postHighlight(anchorId)
+  }
+}
+
+/** 文档侧「定位」按钮 hover 显示：事件委托 mouseover/mouseout。 */
+const iframeEl = ref<HTMLIFrameElement | null | undefined>(undefined)
+
+function onDocMouseover(e: MouseEvent) {
+  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  if (!host) return
+  host.classList.add('pa-locate-hover')
+}
+
+function onDocMouseout(e: MouseEvent) {
+  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  if (!host) return
+  host.classList.remove('pa-locate-hover')
+}
+
+/** 段落点击（委托）：点击落在「定位」按钮区域内（伪元素区域，坐标判断）
+ * 才触发反向定位，点段落其他位置不误触。 */
+function onDocClick(e: MouseEvent) {
+  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  if (!host || !host.classList.contains('pa-locate-hover')) return
+  // 「定位」按钮区域：段落顶部 28px 内（按钮在 top:-10px 高 20px）
+  const rect = host.getBoundingClientRect()
+  if (e.clientY <= rect.top + 28) {
+    e.preventDefault()
+    const anchorId = host.getAttribute('data-pa')
+    if (anchorId) locateAnchor(anchorId)
+  }
 }
 
 const md = new MarkdownIt({ html: true, linkify: true })
@@ -173,6 +278,7 @@ onBeforeUnmount(() => {
         </div>
         <iframe
           v-if="iframeSrc"
+          ref="iframeEl"
           :src="iframeSrc"
           :sandbox="sandboxAttr"
           data-testid="viewer-proto-frame"
@@ -209,7 +315,12 @@ onBeforeUnmount(() => {
             锚点 {{ anchorCount }}
           </span>
         </div>
-        <div class="prd-scroll">
+        <div
+          class="prd-scroll"
+          @mouseover="onDocMouseover"
+          @mouseout="onDocMouseout"
+          @click="onDocClick"
+        >
           <p v-if="docLoading" class="empty">加载中…</p>
           <p v-else-if="!overview.docs.length" class="empty">
             仓库内未发现 markdown 文档（prd/ 目录或根目录 *.md）
@@ -337,6 +448,33 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   transition: background 0.3s ease;
 }
+
+/* T3.2 反向联动「定位」按钮：[data-pa] 元素 hover 时右上角浮现。
+   伪元素实现（v-html 渲染的 markdown 不能插组件），点击走事件委托。 */
+.markdown-body :deep([data-pa]) {
+  position: relative;
+}
+.markdown-body :deep(.pa-locate-hover)::before {
+  content: '定位';
+  position: absolute;
+  top: -10px;
+  left: 8px;
+  z-index: 10;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: #2b5cff;
+  color: #fff;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  user-select: none;
+}
+.markdown-body :deep(.pa-locate-hover:hover)::before {
+  background: #1e4fd8;
+}
+/* 伪元素点击 → 宿主是 [data-pa]（e.target 是宿主元素本体，
+   closest('.pa-locate-btn') 匹配不到，改由 closest('[data-pa]') 命中） */
 
 .loading { align-items: center; justify-content: center; }
 </style>

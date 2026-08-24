@@ -13,11 +13,20 @@ export interface ProjectInfo {
   created_at: string
 }
 
+/** 页面地图条目（T3.2）：PRD 第 4 章表格解析结果 */
+export interface PageMapEntry {
+  name: string
+  proto: string
+  anchor: string
+}
+
 export interface ProjectOverview {
   project: ProjectInfo
   docs: string[]
   proto_entries: string[]
-  page_map: unknown[]
+  page_map: PageMapEntry[]
+  /** 锚点 ID → 原型文件（T3.2）：组件锚点不在页面地图里，靠本索引找文件 */
+  proto_anchor_index: Record<string, string>
   reconcile_summary: unknown | null
 }
 
