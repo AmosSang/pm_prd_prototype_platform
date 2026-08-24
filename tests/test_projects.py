@@ -352,3 +352,42 @@ class TestSyncProject:
         resp = client.post(f"/api/projects/{pid}/sync")
         assert resp.status_code == 400
         assert "重新绑定" in resp.get_json()["msg"]
+
+
+# ───────────────────────── T4.5 项目级「可评论」开关 ─────────────────────────
+
+class TestUpdateProject:
+    """PATCH /api/projects/{pid} {commentable}（产品方案 §4.5）。"""
+
+    def _make_project(self, client, tmp_path, name: str) -> int:
+        remote = make_bare_remote(tmp_path, name)
+        resp = client.post("/api/projects", json={
+            "name": name, "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        return resp.get_json()["data"]["id"]
+
+    def test_commentable_default_on_and_toggle(self, app, tmp_path):
+        """默认开启（T2.3 建表预留）；PATCH 关→开往返落库且响应带最新值。"""
+        client, _ = app
+        pid = self._make_project(client, tmp_path, "开关项目")
+        assert Project.get(Project.id == pid).commentable is True
+
+        resp = client.patch(f"/api/projects/{pid}", json={"commentable": False})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["data"]["commentable"] is False
+        assert Project.get(Project.id == pid).commentable is False
+
+        resp = client.patch(f"/api/projects/{pid}", json={"commentable": True})
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["commentable"] is True
+        assert Project.get(Project.id == pid).commentable is True
+
+    def test_commentable_validation(self, app, tmp_path):
+        """缺字段 / 非布尔（字符串、数字——bool 是 int 子类须显式排除）/ 项目不存在。"""
+        client, _ = app
+        pid = self._make_project(client, tmp_path, "开关项目2")
+        assert client.patch(f"/api/projects/{pid}", json={}).status_code == 400
+        assert client.patch(f"/api/projects/{pid}", json={"commentable": "yes"}).status_code == 400
+        assert client.patch(f"/api/projects/{pid}", json={"commentable": 1}).status_code == 400
+        assert client.patch("/api/projects/99999", json={"commentable": True}).status_code == 404

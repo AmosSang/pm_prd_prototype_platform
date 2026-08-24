@@ -97,6 +97,11 @@ export function syncProject(id: number): Promise<ProjectInfo> {
   return api.post<ProjectInfo>(`/api/projects/${id}/sync`)
 }
 
+/** 项目级「可评论」开关（T4.5）：关闭后全员评论入口置灰（已有评论可查看）。 */
+export function updateProject(id: number, body: { commentable: boolean }): Promise<ProjectInfo> {
+  return api.patch<ProjectInfo>(`/api/projects/${id}`, body)
+}
+
 // ───────────────────────── 评论（T4.2）─────────────────────────
 
 /** 评论 DOM 定位 payload（bridge 采集，技术方案 §2.3；schema 见 server/reviews.py） */

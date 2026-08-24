@@ -756,3 +756,39 @@ test.describe('T4.4 评论定位与文档角标', () => {
     await expect(page.getByTestId('loc-count')).toHaveText('×2')
   })
 })
+
+// ═══════════════════ T4.5 项目级「可评论」开关 ═══════════════════
+
+test.describe('T4.5 项目级可评论开关', () => {
+  test('关闭后入口置灰、已有评论可查看；重新开启恢复', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 关闭前提交一条评论（成为「已有评论」）
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d = await submitAndWait(page, '开关关闭前提交的评论')
+    await page.getByTestId('comment-done').click()
+    await waitForGitLog(cloneDirOf(page), `comment: ${d.comment_id} 创建`)
+
+    // 关闭「允许评论」→ 评论模式联动关闭 + 入口置灰（任务卡验收点）
+    await page.getByTestId('commentable-toggle').click()
+    await expect(
+      page.frameLocator('[data-testid="viewer-proto-frame"]').locator('html'),
+    ).not.toHaveClass(/pp-comment-mode/, { timeout: 5_000 })
+    await expect(page.getByTestId('comment-mode')).toHaveClass(/is-disabled/)
+    await expect(page.getByTestId('comment-mode')).not.toHaveClass(/is-checked/)
+    await expect(page.getByTestId('comment-page-btn')).toBeDisabled()
+
+    // 已有评论仍可查看：抽屉打开 + 条目可见（产品方案 §4.5）
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await expect(page.locator(`[data-cid="${d.comment_id}"]`)).toBeVisible()
+
+    // 重新开启 → 评论模式开关恢复可用
+    await page.getByTestId('commentable-toggle').click()
+    await expect(page.getByTestId('comment-mode')).not.toHaveClass(/is-disabled/, {
+      timeout: 5_000,
+    })
+    await expect(page.getByTestId('commentable-toggle')).toHaveClass(/is-checked/)
+  })
+})

@@ -95,6 +95,31 @@ def list_projects():
     return jsonify(code=0, data=[_project_public(p) for p in rows]), 200
 
 
+@bp.patch("/<int:pid>")
+def update_project(pid: int):
+    """项目设置更新（T4.5）：commentable 可评论开关。
+
+    产品方案 §4.5：默认开启；关闭后全员评论入口置灰（已有评论仍可查看，
+    POST /comments 已在 T4.2 拦截）。用途：PM 驱动 Agent 修改前关闭开关
+    消除 reviews/ 双写窗口，平台同步刷新后再开启。一期无角色权限，
+    登录用户均可操作。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+
+    data = request.get_json(silent=True) or {}
+    if "commentable" not in data:
+        return _err("缺少 commentable 字段", 400)
+    val = data["commentable"]
+    if not isinstance(val, bool):
+        return _err("commentable 必须是布尔值", 400)
+
+    p.commentable = val
+    p.save()
+    return jsonify(code=0, data=_project_public(p)), 200
+
+
 @bp.get("/<int:pid>/git-status")
 def git_status(pid: int):
     p = Project.get_or_none(Project.id == pid)

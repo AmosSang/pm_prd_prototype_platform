@@ -14,6 +14,7 @@ import {
   getReconcile,
   listComments,
   listProjects,
+  updateProject,
   uploadShot,
   type CommentItem,
   type CommentPayload,
@@ -75,6 +76,33 @@ const iframeSrc = computed(() =>
 const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox'
 const ready = ref(false)
 const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
+
+// ───────────────────────── T4.5 项目级「可评论」开关 ─────────────────────────
+// 产品方案 §4.5：默认开启；关闭后全员评论入口置灰（已有评论仍可查看——
+// 抽屉/角标不受影响）。PM 驱动 Agent 修改前关闭、同步刷新后再开启，
+// 消除 reviews/ 双写窗口。POST /comments 服务端已兜底拦截（T4.2）。
+const commentable = ref(true)
+
+async function onCommentableChange(on: string | number | boolean) {
+  if (!overview.value) return
+  const val = !!on
+  try {
+    const p = await updateProject(overview.value.project.id, { commentable: val })
+    overview.value.project = p
+    commentable.value = val
+    if (!val) {
+      // 联动关评论模式（入口置灰由 :disabled 与模式关闭共同保证），
+      // 收起可能开着的评论框
+      if (commentMode.value) onCommentModeChange(false)
+      capturedPayload.value = null
+      resetCommentBox()
+    }
+    ElMessage.success(val ? '已开启评论' : '已关闭评论（已有评论仍可查看）')
+  } catch (e) {
+    commentable.value = !val // 失败回滚开关 UI
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
 
 // ───────────────────────── T4.1/T4.2 评论模式与评论框 ─────────────────────────
 const commentMode = ref(false)
@@ -699,6 +727,7 @@ onMounted(async () => {
   if (overview.value) {
     currentEntry.value = overview.value.proto_entries[0] || ''
     currentDoc.value = overview.value.docs[0] || ''
+    commentable.value = overview.value.project.commentable // T4.5
     refreshComments() // T4.4：初始角标（含打开过的抽屉数据）
   }
 })
@@ -714,6 +743,20 @@ onBeforeUnmount(() => {
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
       <span class="meta">{{ slug }} · {{ overview.project.branch }}</span>
+      <!-- T4.5 项目级「可评论」开关：关闭后全员评论入口置灰（已有评论可查看）。
+           PM 驱动 Agent 修改前关闭，同步刷新后再开启（消除 reviews/ 双写窗口） -->
+      <span
+        class="comment-toggle"
+        title="项目级开关：关闭后全员无法新增评论（已有评论仍可查看）；驱动 Agent 修改前建议关闭"
+      >
+        允许评论
+        <el-switch
+          v-model="commentable"
+          size="small"
+          data-testid="commentable-toggle"
+          @change="onCommentableChange"
+        />
+      </span>
       <!-- T4.1 评论模式开关：开启后点击原型元素采集评论定位 payload -->
       <span class="comment-toggle" title="开启后 hover 高亮、点击原型元素采集评论定位信息">
         评论模式
@@ -721,6 +764,7 @@ onBeforeUnmount(() => {
           v-model="commentMode"
           size="small"
           data-testid="comment-mode"
+          :disabled="!commentable"
           @change="onCommentModeChange"
         />
       </span>
@@ -780,8 +824,8 @@ onBeforeUnmount(() => {
           <!-- T4.2 页面评论入口（产品方案 §4.5「评论本页」） -->
           <button
             class="comment-page-btn"
-            :disabled="!commentMode || !ready"
-            :title="commentMode ? '对当前页面整体发表评论' : '开启评论模式后可用'"
+            :disabled="!commentable || !commentMode || !ready"
+            :title="!commentable ? '项目已关闭评论' : commentMode ? '对当前页面整体发表评论' : '开启评论模式后可用'"
             data-testid="comment-page-btn"
             @click="commentPage"
           >
