@@ -57,7 +57,7 @@ print(f'[smoke] 清理 e2e 频控记录 {n} 条')
 from server.config import REPOS_DIR
 import os
 for p in Project.select().where(
-    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E'])
+    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目'])
     | Project.name.startswith('同步E2E-')
 ):
     shutil.rmtree(os.path.join(REPOS_DIR, p.project_id), ignore_errors=True)

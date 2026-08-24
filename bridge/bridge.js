@@ -7,6 +7,10 @@
  *        + 点击 icon 发 ANCHOR_CLICK（宿主侧滚动右侧文档并高亮 2s）
  * T3.2：反向联动——HIGHLIGHT_ANCHOR（宿主点文档「定位」→ 滚动到锚点元素
  *        + outline 脉冲闪烁 3 次；锚点不在本页时由宿主先切页再发）
+ * T4.1：评论模式——SET_COMMENT_MODE 开关 + hover 蓝色高亮 + click 捕获拦截
+ *        （stopPropagation/preventDefault）+ payload 一次性采集（ELEMENT_SELECTED，
+ *        字段表见技术方案 §2.3）+ ROUTE_CHANGE（SPA 路由切换上报：
+ *        pushState/replaceState monkey-patch + hashchange/popstate）
  *
  * 认证机制：sandbox（无 allow-same-origin）下 iframe origin 为不透明 "null"，
  * 无法按 origin 校验。采用 URL nonce：宿主在 iframe src 的 hash 中携带随机
@@ -341,6 +345,8 @@
   document.addEventListener(
     'mouseover',
     function (e) {
+      // 评论模式下锚点 icon 让位（不显示不换目标），由评论高亮接管（T4.1）
+      if (commentMode) return
       // icon 自身：接住——取消渐隐恢复常显，不换目标
       if (e.target && e.target.classList && e.target.classList.contains('pp-anchor-icon')) {
         if (iconState === 'fading') cancelFade()
@@ -462,6 +468,221 @@
     return true
   }
 
+  // ─── 评论模式（T4.1）────────────────────────────────────────
+  // 宿主 SET_COMMENT_MODE 开关。开启后：hover 元素蓝色高亮；click 在捕获
+  // 阶段拦截（stopPropagation + preventDefault，避免触发原型自身交互——
+  // 表单提交、弹窗打开等），一次性采集 DOM 定位 payload（技术方案 §2.3）
+  // 发 ELEMENT_SELECTED。锚点 icon（◈）在评论模式下让位。
+
+  var commentMode = false
+  var commentHoverEl = null
+  var commentStyleEl = null
+
+  /** 当前页面相对 prototype/ 的路径（评论 JSON 的 prototype_page 口径）。
+   * /proto/{slug}/prototype/pages/login.html → pages/login.html。
+   * SPA 场景 hash 变化不改变本值（路由细节记在 interaction_state.route）。 */
+  function currentPage() {
+    var m = /^\/proto\/[a-z0-9-]+\/(?:prototype\/)?(.*)$/.exec(window.location.pathname)
+    return m ? m[1] : window.location.pathname
+  }
+
+  /** 业务 hash：剔除宿主注入的 pp-nonce 认证参数（不属于原型路由）。 */
+  function cleanHash() {
+    var h = window.location.hash || ''
+    if (!h) return ''
+    var body = h.charAt(0) === '#' ? h.slice(1) : h
+    var kept = body.split('&').filter(function (kv) {
+      return kv && kv.indexOf('pp-nonce=') !== 0
+    })
+    return kept.length ? '#' + kept.join('&') : ''
+  }
+
+  /** 元素开标签序列化（含属性），用于 outer_html 的祖先上下文包裹。 */
+  function openTagOf(node) {
+    var s = '<' + node.tagName.toLowerCase()
+    for (var i = 0; i < node.attributes.length; i++) {
+      var a = node.attributes[i]
+      s += ' ' + a.name + '="' + String(a.value).replace(/"/g, '&quot;') + '"'
+    }
+    return s + '>'
+  }
+
+  /** outer_html：目标元素 outerHTML + 最多 2 层元素祖先的开/闭标签包裹。
+   * 设计（产品方案 §3.3「含 2–3 层祖先」）：祖先提供挂载上下文（与
+   * css_path 互补），不含兄弟内容（兄弟噪音对 AI 定位无价值且撑爆体积）；
+   * body/html 不包（无意义）。超过 4KB 截断。 */
+  var OUTER_HTML_LIMIT = 4096
+  function outerHtmlWithAncestors(el) {
+    var chain = []
+    var p = el.parentElement
+    while (p && p !== document.body && p.nodeType === 1 && chain.length < 2) {
+      chain.unshift(p)
+      p = p.parentElement
+    }
+    var s = ''
+    for (var i = 0; i < chain.length; i++) s += openTagOf(chain[i])
+    s += el.outerHTML
+    for (var j = chain.length - 1; j >= 0; j--) {
+      s += '</' + chain[j].tagName.toLowerCase() + '>'
+    }
+    if (s.length > OUTER_HTML_LIMIT) s = s.slice(0, OUTER_HTML_LIMIT) + '…(截断)'
+    return s
+  }
+
+  /** text_excerpt：文本内容 200 字截断；表单控件取 value/placeholder 兜底。 */
+  function textExcerptOf(el) {
+    var t = (el.textContent || '').trim()
+    if (!t && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      t = (el.value || el.placeholder || '').trim()
+    }
+    return t.length > 200 ? t.slice(0, 200) + '…' : t
+  }
+
+  /** interaction_state.modal_open：可见 position:fixed 元素近似判断（技术
+   * 方案 §2.3「统计可见的 position:fixed 高 z-index 元素」）。命中规则：
+   *   a) 覆盖面积 ≥ 视口 40%（全屏遮罩型弹层，如 inset:0 的 modal-mask，
+   *      这类常见写法不设 z-index，纯 z-index 判定会漏）
+   *   b) z-index ≥ 100 且高度 ≥ 视口 20%（抽屉/面板型；细横条视为固定
+   *      导航栏排除，避免普通顶栏误报）
+   * bridge 注入物（锚点 icon 等）不计入。 */
+  function detectModalOpen() {
+    var els = document.querySelectorAll('body *')
+    var vw = window.innerWidth
+    var vh = window.innerHeight
+    if (!vw || !vh) return false
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i]
+      if (el.closest('.pp-anchor-icon')) continue
+      var cs = window.getComputedStyle(el)
+      if (cs.position !== 'fixed' || cs.display === 'none' || cs.visibility === 'hidden') continue
+      if (parseFloat(cs.opacity) < 0.1) continue
+      var r = el.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) continue
+      if ((r.width * r.height) / (vw * vh) >= 0.4) return true
+      var z = parseInt(cs.zIndex, 10) || 0
+      if (z >= 100 && r.height >= vh * 0.2) return true
+    }
+    return false
+  }
+
+  /** payload 一次性采集（技术方案 §2.3 字段表，产品方案 §3.3 DOM 定位组）。
+   * 服务端 schema 校验见 server/reviews.py（契约测试 tests/test_reviews.py）。 */
+  function collectPayload(el) {
+    var isPageRoot = el === document.body || el === document.documentElement
+    var nearest = el.parentElement ? el.parentElement.closest('[data-pa]') : null
+    return {
+      target_type: isPageRoot ? 'page' : 'dom',
+      prototype_page: currentPage(),
+      anchor_id: (el.getAttribute && el.getAttribute('data-pa')) || '',
+      nearest_anchor_id: nearest ? nearest.getAttribute('data-pa') : '',
+      css_path: isPageRoot ? 'body' : cssPathOf(el),
+      outer_html: outerHtmlWithAncestors(el),
+      text_excerpt: textExcerptOf(el),
+      interaction_state: {
+        modal_open: detectModalOpen(),
+        viewport: window.innerWidth + 'x' + window.innerHeight,
+        scroll_y: Math.round(window.scrollY || window.pageYOffset || 0),
+        route: currentPage() + cleanHash(),
+      },
+    }
+  }
+
+  function ensureCommentStyle() {
+    if (commentStyleEl) return
+    commentStyleEl = document.createElement('style')
+    commentStyleEl.textContent =
+      'html.pp-comment-mode{cursor:crosshair;}' +
+      '.pp-comment-hover{box-shadow:0 0 0 2px #2b5cff !important;cursor:crosshair;}'
+    document.head.appendChild(commentStyleEl)
+  }
+
+  function clearCommentHover() {
+    if (commentHoverEl) {
+      commentHoverEl.classList.remove('pp-comment-hover')
+      commentHoverEl = null
+    }
+  }
+
+  function setCommentMode(on) {
+    commentMode = !!on
+    ensureCommentStyle()
+    document.documentElement.classList.toggle('pp-comment-mode', commentMode)
+    if (commentMode) {
+      hideIcon() // 锚点 icon 让位（mouseover 状态机入口已短路，这里清掉残留显示）
+    } else {
+      clearCommentHover()
+    }
+  }
+
+  // hover 高亮：mouseover 捕获阶段委托（与锚点 icon 同一事件模型）。
+  // body/html 不加高亮（整页变蓝无意义），点击仍可选（target_type=page）。
+  document.addEventListener(
+    'mouseover',
+    function (e) {
+      if (!commentMode) return
+      var el = e.target
+      if (!el || !el.closest) return
+      if (el.closest('.pp-anchor-icon')) return
+      if (el === document.documentElement || el === document.body) {
+        clearCommentHover()
+        return
+      }
+      if (commentHoverEl === el) return
+      clearCommentHover()
+      commentHoverEl = el
+      el.classList.add('pp-comment-hover')
+    },
+    true,
+  )
+  // 移出 iframe 窗口时清高亮（无后续 mouseover，防残留）
+  document.addEventListener(
+    'mouseout',
+    function (e) {
+      if (commentMode && e.relatedTarget === null) clearCommentHover()
+    },
+    true,
+  )
+
+  // 评论模式 click：捕获阶段拦截——在原型自身的冒泡 handler 之前执行，
+  // preventDefault 阻止默认行为（表单提交/链接导航），stopPropagation 阻断
+  // 原型交互逻辑；采集后上报。局限：原型若也用捕获阶段且先注册，仍会先执行
+  // （罕见写法，一期接受，记录在案）。
+  document.addEventListener(
+    'click',
+    function (e) {
+      if (!commentMode) return
+      var el = e.target
+      if (!el || !el.closest) return
+      if (el.closest('.pp-anchor-icon')) return // bridge 注入物不是评论目标
+      e.preventDefault()
+      e.stopPropagation()
+      send('ELEMENT_SELECTED', { payload: collectPayload(el) })
+    },
+    true,
+  )
+
+  // ─── ROUTE_CHANGE（T4.1，SPA 路由切换上报）──────────────────
+  // 多页原型的页面切换 = iframe src 变化 = 整页重载（READY 已覆盖）；
+  // SPA 原型的路由切换（pushState/replaceState/hash 变化）页面不重载，
+  // bridge 主动上报，宿主侧追踪当前路由。
+  function notifyRouteChange() {
+    send('ROUTE_CHANGE', { page: currentPage(), route: currentPage() + cleanHash() })
+  }
+  var rawPushState = history.pushState
+  history.pushState = function () {
+    var r = rawPushState.apply(this, arguments)
+    notifyRouteChange()
+    return r
+  }
+  var rawReplaceState = history.replaceState
+  history.replaceState = function () {
+    var r = rawReplaceState.apply(this, arguments)
+    notifyRouteChange()
+    return r
+  }
+  window.addEventListener('hashchange', notifyRouteChange)
+  window.addEventListener('popstate', notifyRouteChange)
+
   // ─── 消息分发 ───────────────────────────────────────────────
 
   // 宿主 → iframe：来源 origin 与 referrer 一致 + nonce 匹配才接受
@@ -473,6 +694,8 @@
 
     if (msg.type === 'PING') {
       send('ECHO', { echo: 'pong-' + msg.nonce, page: window.location.pathname })
+    } else if (msg.type === 'SET_COMMENT_MODE') {
+      setCommentMode(!!msg.enabled)
     } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
       // 反向联动（T3.2）：false 表示本页没有该锚点（正常不会发生——
       // 宿主已按页面地图切页；万一落空回 ACK 让宿主 toast 提示）

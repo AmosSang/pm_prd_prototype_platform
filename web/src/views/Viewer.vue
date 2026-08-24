@@ -14,7 +14,8 @@ import {
 } from '../projects'
 
 /**
- * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动 + T3.3 对账。
+ * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动 + T3.3 对账
+ * + T4.1 评论模式采集。
  * 左：原型 iframe（:8081 独立 origin + sandbox + URL nonce，bridge.js 由代理注入）
  * 右：PRD markdown 渲染（markdown-it + 锚点插件，多文档 el-select 切换）
  * 中：可拖动分割条（pointer 事件，父级相对宽度）
@@ -26,7 +27,28 @@ import {
  * 跨文档：锚点不在当前文档时切文档再定位（正向反向共用）。
  * T3.3 对账：顶栏提示条（匹配 · 缺失 · 未描述），点击拉明细弹窗
  * （三态 + 重复 ID + 页面地图坏引用，数据来自服务端静态解析）。
+ * T4.1 评论模式：顶栏开关 → SET_COMMENT_MODE；bridge 采集 ELEMENT_SELECTED
+ * payload 在左侧底部面板展示（T4.2 将升级为评论框）。iframe 重载（切页）后
+ * READY 时重发开关保持状态；ROUTE_CHANGE 更新 SPA 当前路由显示。
  */
+
+/** 评论 DOM 定位 payload（bridge 采集，技术方案 §2.3；schema 见 server/reviews.py） */
+interface InteractionState {
+  modal_open: boolean
+  viewport: string
+  scroll_y: number
+  route: string
+}
+interface CommentPayload {
+  target_type: 'dom' | 'page' | 'doc_block'
+  prototype_page: string
+  anchor_id: string
+  nearest_anchor_id: string
+  css_path: string
+  outer_html: string
+  text_excerpt: string
+  interaction_state: InteractionState
+}
 
 const route = useRoute()
 const slug = route.params.slug as string
@@ -59,12 +81,35 @@ const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-esca
 const ready = ref(false)
 const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
 
+// ───────────────────────── T4.1 评论模式 ─────────────────────────
+const commentMode = ref(false)
+const capturedPayload = ref<CommentPayload | null>(null)
+const currentRoute = ref('') // ROUTE_CHANGE 上报的 SPA 当前路由（页面 + hash）
+
+function postSetCommentMode(enabled: boolean) {
+  // targetOrigin '*'：同 postHighlight 的沙箱约束（不透明 origin 为 "null"）
+  iframeEl.value?.contentWindow?.postMessage(
+    { type: 'SET_COMMENT_MODE', enabled, nonce },
+    '*',
+  )
+}
+
+/** 评论模式开关切换：同步 bridge + 清采集面板（新旧会话不混淆）。 */
+function onCommentModeChange(on: string | number | boolean) {
+  commentMode.value = !!on
+  capturedPayload.value = null
+  postSetCommentMode(!!on)
+}
+
 function onMessage(event: MessageEvent) {
   const msg = event.data || {}
   if (event.origin !== PROTO_ORIGIN && event.origin !== 'null') return
   if (msg.nonce !== nonce) return
   if (msg.type === 'READY') {
     ready.value = true
+    // 评论模式 sticky：iframe 重载（切页/重导航）后 bridge 内存状态归零，
+    // 开关若开着须重发（否则新页点击不采集）
+    if (commentMode.value) postSetCommentMode(true)
     // 跨页定位：切页后等 READY 再发 HIGHLIGHT_ANCHOR（技术方案 §2.5）
     if (pendingHighlight.value) {
       const anchorId = pendingHighlight.value
@@ -80,6 +125,14 @@ function onMessage(event: MessageEvent) {
   }
   if (msg.type === 'HIGHLIGHT_ACK' && msg.hit === false) {
     ElMessage.info(`锚点「${msg.anchorId}」在原型中缺失`)
+  }
+  if (msg.type === 'ELEMENT_SELECTED' && msg.payload) {
+    capturedPayload.value = msg.payload as CommentPayload
+  }
+  if (msg.type === 'ROUTE_CHANGE') {
+    // route 含 hash（SPA 视角完整）；旧消息无 route 时退回 page
+    currentRoute.value =
+      (typeof msg.route === 'string' && msg.route) || String(msg.page || '')
   }
 }
 
@@ -302,6 +355,16 @@ onBeforeUnmount(() => {
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
       <span class="meta">{{ slug }} · {{ overview.project.branch }}</span>
+      <!-- T4.1 评论模式开关：开启后点击原型元素采集评论定位 payload -->
+      <span class="comment-toggle" title="开启后 hover 高亮、点击原型元素采集评论定位信息">
+        评论模式
+        <el-switch
+          v-model="commentMode"
+          size="small"
+          data-testid="comment-mode"
+          @change="onCommentModeChange"
+        />
+      </span>
       <!-- T3.3 对账提示条：匹配 · 缺失 · 未描述（点击看明细） -->
       <span
         v-if="reconSummary"
@@ -337,6 +400,15 @@ onBeforeUnmount(() => {
           >
             <el-option v-for="e in overview.proto_entries" :key="e" :label="e" :value="e" />
           </el-select>
+          <!-- T4.1 SPA 路由显示（ROUTE_CHANGE 上报后才出现） -->
+          <span
+            v-if="currentRoute"
+            class="route-tag"
+            data-testid="current-page"
+            :title="currentRoute"
+          >
+            {{ currentRoute }}
+          </span>
           <span class="ready" :data-ready="ready">{{ ready ? '已就绪' : '加载中…' }}</span>
         </div>
         <iframe
@@ -347,6 +419,37 @@ onBeforeUnmount(() => {
           data-testid="viewer-proto-frame"
         />
         <p v-else class="empty">仓库内未发现 prototype/ 目录或 HTML 入口</p>
+        <!-- T4.1 评论模式采集结果面板（T4.2 将升级为评论框） -->
+        <div v-if="capturedPayload" class="capture-panel" data-testid="payload-panel">
+          <div class="cp-title">已采集评论定位信息</div>
+          <div class="cp-grid">
+            <span class="k">target_type</span>
+            <b data-testid="payload-target-type">{{ capturedPayload.target_type }}</b>
+            <span class="k">prototype_page</span>
+            <b data-testid="payload-page">{{ capturedPayload.prototype_page }}</b>
+            <span class="k">anchor_id</span>
+            <b data-testid="payload-anchor">{{ capturedPayload.anchor_id || '（无）' }}</b>
+            <span class="k">nearest_anchor_id</span>
+            <b data-testid="payload-nearest">{{ capturedPayload.nearest_anchor_id || '（无）' }}</b>
+            <span class="k">css_path</span>
+            <b class="mono" data-testid="payload-css-path">{{ capturedPayload.css_path }}</b>
+            <span class="k">text_excerpt</span>
+            <b data-testid="payload-text">{{ capturedPayload.text_excerpt || '（无文本）' }}</b>
+            <span class="k">modal_open</span>
+            <b data-testid="payload-modal-open">{{ capturedPayload.interaction_state.modal_open }}</b>
+            <span class="k">viewport</span>
+            <b data-testid="payload-viewport">{{ capturedPayload.interaction_state.viewport }}</b>
+            <span class="k">scroll_y</span>
+            <b data-testid="payload-scroll-y">{{ capturedPayload.interaction_state.scroll_y }}</b>
+            <span class="k">route</span>
+            <b class="mono" data-testid="payload-route">{{ capturedPayload.interaction_state.route }}</b>
+            <span class="k">outer_html</span>
+            <details class="cp-details">
+              <summary>展开（目标 + 祖先上下文）</summary>
+              <code data-testid="payload-outer-html">{{ capturedPayload.outer_html }}</code>
+            </details>
+          </div>
+        </div>
       </section>
 
       <!-- 分割条 -->
@@ -616,6 +719,60 @@ onBeforeUnmount(() => {
   background: #f5f6f8;
 }
 .proto .empty { padding: 24px; color: #999; }
+
+/* T4.1 评论模式 */
+.v-head .comment-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #57606a;
+  white-space: nowrap;
+}
+.pane-head .route-tag {
+  color: #999;
+  font-size: 12px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* T4.1 采集结果面板（左侧底部；T4.2 升级为评论框后移除） */
+.capture-panel {
+  flex-shrink: 0;
+  border-top: 1px solid #e6e8ec;
+  background: #fbfcfe;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.capture-panel .cp-title {
+  color: #2b5cff;
+  margin-bottom: 6px;
+}
+.capture-panel .cp-grid {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  gap: 3px 10px;
+  align-items: baseline;
+}
+.capture-panel .k { color: #999; }
+.capture-panel b { font-weight: 500; color: #24292f; word-break: break-all; }
+.capture-panel .mono,
+.capture-panel .cp-details code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.capture-panel .cp-details { margin: 0; }
+.capture-panel .cp-details summary { cursor: pointer; color: #2b5cff; }
+.capture-panel .cp-details code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 4px;
+}
 
 .divider {
   width: 6px;
