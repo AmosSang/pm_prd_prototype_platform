@@ -2,6 +2,7 @@
 
 表随任务卡逐步增加：
 - T2.1: users / verification_codes
+- T2.3: projects
 """
 import datetime as dt
 
@@ -54,7 +55,25 @@ class VerificationCode(BaseModel):
     created_at = peewee.CharField(default=utcnow_str)
 
 
+class Project(BaseModel):
+    """项目（T2.3）。project_id 用随机短 slug（kebab-case），是本地 clone 目录名
+    与 /proto/{project_id}/ 路径前缀，与数字主键 id 分离——路径不可猜测遍历。"""
+    id = peewee.AutoField(primary_key=True)
+    project_id = peewee.CharField(unique=True, null=False)
+    name = peewee.CharField(null=False)
+    repo_url = peewee.CharField(null=False)
+    # Fernet 加密的 git token（crypto_util 加解密；任何接口不回传）
+    encrypted_token = peewee.CharField(null=False)
+    branch = peewee.CharField(default="main", null=False)
+    # 项目级「可评论」开关（T4.x 用）
+    commentable = peewee.BooleanField(default=True)
+    # 同步状态（T3.3 SYNC_PULL 用；T2.3 先记录 clone 结果）
+    last_sync_at = peewee.CharField(null=True)
+    sync_error = peewee.CharField(null=True)
+    created_at = peewee.CharField(default=utcnow_str)
+
+
 def init_tables() -> None:
     """建表（幂等）。应用启动与测试 fixture 共用。"""
     db.connect(reuse_if_open=True)
-    db.create_tables([User, VerificationCode], safe=True)
+    db.create_tables([User, VerificationCode, Project], safe=True)

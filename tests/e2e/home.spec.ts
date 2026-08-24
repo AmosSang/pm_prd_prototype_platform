@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test'
 
-test('首页标题与后端连接状态', async ({ page }) => {
+test('首页：项目列表 + 后端连接状态', async ({ page }) => {
   await page.goto('/')
   await expect(page).toHaveTitle('产品方案展示平台')
-  await expect(page.getByRole('heading', { name: '产品方案展示平台' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '项目列表' })).toBeVisible()
 
-  // 后端连接状态最终应显示「正常」（App.vue 的 /api/health 探测）
+  // 后端连接状态最终应显示「正常」（Home.vue 的 /api/health 探测）
   await expect(page.locator('.ok')).toHaveText('正常', { timeout: 10_000 })
+
+  // demo 项目卡片常驻（T2.3 起与真实项目卡片并列）
+  await expect(page.getByTestId('project-card-demo')).toBeVisible()
 })

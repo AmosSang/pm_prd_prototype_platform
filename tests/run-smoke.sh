@@ -47,10 +47,18 @@ server/.venv/bin/python -m server.cli user-add e2e-reload@test.local 刷新恢�
 server/.venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试员 >/dev/null 2>&1 || true
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
-from server.models import VerificationCode, init_tables
+import shutil
+from server.models import VerificationCode, Project, init_tables
 init_tables()
 n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
+# 清 T2.3 E2E 绑定的项目记录与本地 clone（否则重复跑 smoke 卡片越积越多）
+from server.config import REPOS_DIR
+import os
+for p in Project.select().where(Project.name << ['E2E绑定项目', '错误token项目']):
+    shutil.rmtree(os.path.join(REPOS_DIR, p.project_id), ignore_errors=True)
+    p.delete_instance()
+print('[smoke] 清理 e2e 项目记录')
 " || true
 
 echo "[smoke] 启动前端..."
