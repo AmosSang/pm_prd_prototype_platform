@@ -244,14 +244,15 @@ def _build_comment_json(
         cj["highlight_rect"] = rect
     # 文档关联（产品方案派生规则：候选锚点查 PRD 命中段落；未命中标记）
     if payload["target_type"] == "doc_block":
-        # 文档评论：前端已带 doc_anchor_id/doc_excerpt，服务端补指纹
+        # 文档评论：任意段落可评（无锚点段落用指纹定位，产品方案 §3.3）。
+        # 有锚点 → 服务端复核命中的段落（doc_excerpt/doc_path 以服务端为准）；
+        # 无锚点 → 前端现采的 doc_excerpt + doc_path（标题链）直接用于指纹。
         anchor = doc["doc_anchor_id"] if doc else str(payload.get("doc_anchor_id") or "")
         excerpt = doc["doc_excerpt"] if doc else str(payload.get("doc_excerpt") or "")
+        doc_path = doc["doc_path"] if doc else str(payload.get("doc_path") or "")
         cj["doc_anchor_id"] = anchor
         cj["doc_excerpt"] = excerpt
-        cj["doc_block_fingerprint"] = _fingerprint(
-            doc["doc_path"] if doc else "", excerpt
-        )
+        cj["doc_block_fingerprint"] = _fingerprint(doc_path, excerpt)
         if doc:
             cj["doc_file"] = doc["doc_file"]
     elif doc:

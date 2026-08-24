@@ -356,48 +356,84 @@ function locateAnchor(anchorId: string) {
   }
 }
 
-/** 文档侧「定位」按钮 hover 显示：事件委托 mouseover/mouseout。 */
+/** 文档侧「定位/评论」按钮 hover 显示：事件委托 mouseover/mouseout。
+ * T4.2 修订：宿主泛化到任意块级元素（p/li/h1-h6/table/blockquote/pre）——
+ * 任意段落都可评论（无锚点段落用指纹定位，产品方案 §3.3）；
+ * 「定位」按钮仍只对 [data-pa] 宿主显示（CSS 选择器限定，无锚点无处可跳）。 */
 const iframeEl = ref<HTMLIFrameElement | null | undefined>(undefined)
 
+const DOC_BLOCK_SELECTOR = 'h1, h2, h3, h4, h5, h6, p, li, table, blockquote, pre'
+
+function docHostOf(target: EventTarget | null): Element | null {
+  return (target as HTMLElement)?.closest?.(DOC_BLOCK_SELECTOR) || null
+}
+
 function onDocMouseover(e: MouseEvent) {
-  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  const host = docHostOf(e.target)
   if (!host) return
   host.classList.add('pa-locate-hover')
 }
 
 function onDocMouseout(e: MouseEvent) {
-  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  const host = docHostOf(e.target)
   if (!host) return
   host.classList.remove('pa-locate-hover')
 }
 
 /** 段落点击（委托）：点击落在顶部按钮区（伪元素区域，坐标判断）才触发——
- * 左上「定位」（T3.2，::before 在 left:8px 宽约 46px）或右上「评论」
- * （T4.2，::after 在 right:8px，仅评论模式开时显示）；点段落其他位置不误触。 */
+ * 左上「定位」（T3.2，::before 在 left:8px，仅 [data-pa] 宿主）或右上
+ * 「评论」（T4.2，::after 在 right:8px，任意块级宿主、评论模式开时）；
+ * 点段落其他位置不误触。 */
 function onDocClick(e: MouseEvent) {
-  const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
+  const host = docHostOf(e.target)
   if (!host || !host.classList.contains('pa-locate-hover')) return
   // 顶部按钮区：段落顶部 28px 内（按钮在 top:-10px 高 20px）
   const rect = host.getBoundingClientRect()
   if (e.clientY > rect.top + 28) return
   e.preventDefault()
   const anchorId = host.getAttribute('data-pa')
-  if (!anchorId) return
   if (e.clientX <= rect.left + 60) {
-    // 左上「定位」
-    locateAnchor(anchorId)
+    // 左上「定位」（仅锚点宿主；无锚点不显示该按钮，点了也不响应）
+    if (anchorId) locateAnchor(anchorId)
     return
   }
   if (commentMode.value && e.clientX >= rect.right - 64) {
     // 右上「评论」：文档段落评论（doc_block，目标为该 PRD 块级元素）
-    openDocComment(host, anchorId)
+    openDocComment(host)
   }
 }
 
+/** 段落的标题路径（与服务端 extract_prd_anchors 的 doc_path 同口径：
+ * h2 起的标题链，"/" 连接）。markdown 渲染的 DOM 是扁平文档流——标题不是
+ * 段落祖先，须向前遍历兄弟收集标题，再按文档序建标题栈（同级兄弟替换、
+ * 更浅级别截断）。 */
+function headingPathOf(host: Element): string {
+  const found: { level: number; text: string }[] = []
+  let node = host.previousElementSibling
+  while (node) {
+    const m = /^H([1-6])$/.exec(node.tagName)
+    if (m) found.push({ level: Number(m[1]), text: (node.textContent || '').trim() })
+    node = node.previousElementSibling
+  }
+  found.reverse() // 文档序（远 → 近）
+  const stack: { level: number; text: string }[] = []
+  for (const h of found) {
+    while (stack.length && stack[stack.length - 1].level >= h.level) stack.pop()
+    stack.push(h)
+  }
+  // h1 是文档题不进链（同服务端口径）
+  return stack
+    .filter((s) => s.level >= 2)
+    .map((s) => s.text)
+    .join('/')
+}
+
 /** 文档段落评论入口（T4.2）：构造 doc_block payload 打开评论框。
- * 原型侧字段全空（无原型定位，schema 允许）；doc_excerpt 现采段落文本，
- * 服务端用 doc_anchor_id 复核 PRD 锚点并补 fingerprint。 */
-function openDocComment(host: Element, anchorId: string) {
+ * 原型侧字段全空（无原型定位，schema 允许）；有锚点段落带 doc_anchor_id
+ * （服务端复核 PRD 锚点）；无锚点段落 doc_anchor_id 空、doc_excerpt +
+ * doc_path（标题路径）现采——服务端据此算内容指纹定位段落。 */
+function openDocComment(host: Element) {
+  const anchorId = host.getAttribute('data-pa') || ''
   const text = (host.textContent || '').replace(/\s+/g, ' ').trim()
   const excerpt = text.length > 200 ? text.slice(0, 200) + '…' : text
   resetCommentBox()
@@ -412,6 +448,7 @@ function openDocComment(host: Element, anchorId: string) {
     interaction_state: { modal_open: false, viewport: '0x0', scroll_y: 0, route: '' },
     doc_anchor_id: anchorId,
     doc_excerpt: excerpt,
+    doc_path: headingPathOf(host),
   }
 }
 
@@ -969,11 +1006,14 @@ onBeforeUnmount(() => {
 }
 
 /* T3.2 反向联动「定位」按钮：[data-pa] 元素 hover 时左上角浮现。
-   伪元素实现（v-html 渲染的 markdown 不能插组件），点击走事件委托。 */
-.markdown-body :deep([data-pa]) {
+   伪元素实现（v-html 渲染的 markdown 不能插组件），点击走事件委托。
+   T4.2 修订：仅锚点宿主显示（无锚点段落无处可跳）；position:relative
+   基座泛化到任意可评论块级宿主（hover class 同名复用）。 */
+.markdown-body :deep([data-pa]),
+.markdown-body :deep(.pa-locate-hover) {
   position: relative;
 }
-.markdown-body :deep(.pa-locate-hover)::before {
+.markdown-body :deep([data-pa].pa-locate-hover)::before {
   content: '定位';
   position: absolute;
   top: -10px;
@@ -989,14 +1029,15 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   user-select: none;
 }
-.markdown-body :deep(.pa-locate-hover:hover)::before {
+.markdown-body :deep([data-pa].pa-locate-hover:hover)::before {
   background: #1e4fd8;
 }
 /* 伪元素点击 → 宿主是 [data-pa]（e.target 是宿主元素本体，
    closest('.pa-locate-btn') 匹配不到，改由 closest('[data-pa]') 命中） */
 
 /* T4.2 文档段落「评论」按钮：评论模式开时 hover 浮现于右上角（::after，
-   与左上「定位」::before 对称）。点击区域判定见 onDocClick。 */
+   与左上「定位」::before 对称）。任意块级宿主（无锚点段落也可评论）。
+   点击区域判定见 onDocClick。 */
 .prd-scroll.comment-on :deep(.pa-locate-hover)::after {
   content: '评论';
   position: absolute;

@@ -116,9 +116,11 @@ export interface CommentPayload {
   outer_html: string
   text_excerpt: string
   interaction_state: InteractionState
-  /** doc_block 评论专有（前端构造，服务端复核 + 补指纹） */
+  /** doc_block 评论专有（前端构造，服务端复核 + 补指纹）。
+   * 无锚点段落：doc_anchor_id 空、doc_path（标题链）+ doc_excerpt 供指纹定位 */
   doc_anchor_id?: string
   doc_excerpt?: string
+  doc_path?: string
 }
 
 export interface HighlightRect {

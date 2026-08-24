@@ -292,10 +292,12 @@ class TestCreateComment:
         assert fj["doc_note"] == "无 PRD 锚点关联"
 
     def test_page_comment(self, app, project):
-        """页面评论（target_type=page）：正常提交落仓。"""
+        """页面评论（target_type=page）：正常提交落仓；outer_html 为空
+        （T4.2 修订：页面根的整页 HTML 无定位意义，bridge 不采集）。"""
         client, p = project
         resp = _submit(client, p, _dom_payload(target_type="page", anchor_id="",
-                                               nearest_anchor_id="", css_path="body"))
+                                               nearest_anchor_id="", css_path="body",
+                                               outer_html=""))
         assert resp.status_code == 200
         cid = resp.get_json()["data"]["comment_id"]
         fj = json.loads(
@@ -304,6 +306,7 @@ class TestCreateComment:
         )
         assert fj["target_type"] == "page"
         assert fj["css_path"] == "body"
+        assert fj["outer_html"] == ""
 
     def test_doc_comment_with_fingerprint(self, app, project):
         """文档评论（doc_block）：fingerprint = sha1(doc_path|excerpt)[:16]。"""
@@ -328,6 +331,31 @@ class TestCreateComment:
         expect = hashlib.sha1("5.1 登录页|账号输入：支持手机号".encode()).hexdigest()[:16]
         assert fj["doc_block_fingerprint"] == expect
         assert "screenshot" not in fj  # 文档评论无截图
+
+    def test_doc_comment_without_anchor_fingerprint(self, app, project):
+        """无锚点段落也可评论（T4.2 修订）：doc_anchor_id 空，指纹用前端
+        现采的 doc_path（标题链）+ doc_excerpt 计算。"""
+        client, p = project
+        import hashlib
+
+        resp = _submit(client, p, _dom_payload(
+            target_type="doc_block", prototype_page="", anchor_id="",
+            nearest_anchor_id="", css_path="", outer_html="",
+            text_excerpt="这段没有锚点，验证任意段落可评论。",
+            doc_anchor_id="", doc_excerpt="这段没有锚点，验证任意段落可评论。",
+            doc_path="5.1 登录页",
+        ), scope="doc")
+        assert resp.status_code == 200
+        cid = resp.get_json()["data"]["comment_id"]
+        fj = json.loads(
+            (Path(app[1]) / p.project_id / "reviews" / "comments" / f"{cid}.json")
+            .read_text(encoding="utf-8")
+        )
+        assert fj["doc_anchor_id"] == ""
+        expect = hashlib.sha1("5.1 登录页|这段没有锚点，验证任意段落可评论。".encode()).hexdigest()[:16]
+        assert fj["doc_block_fingerprint"] == expect
+        # 无锚点是正常场景，不标「无 PRD 锚点关联」（那是 DOM 评论的派生规则）
+        assert "doc_note" not in fj
 
     def test_comment_id_daily_sequence(self, app, project):
         """同日两条：序号递增 001 → 002。"""

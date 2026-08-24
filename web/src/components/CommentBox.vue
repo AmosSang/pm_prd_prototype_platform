@@ -90,7 +90,9 @@ function onSubmit() {
         <b data-testid="payload-target-type">{{ payload.target_type }}</b>
         <template v-if="payload.target_type === 'doc_block'">
           <span class="k">doc_anchor_id</span>
-          <b data-testid="payload-anchor">{{ payload.doc_anchor_id || '（无）' }}</b>
+          <b data-testid="payload-anchor">{{ payload.doc_anchor_id || '（无锚点，指纹定位）' }}</b>
+          <span class="k">doc_path</span>
+          <b data-testid="payload-doc-path">{{ payload.doc_path || '（文档顶部）' }}</b>
           <span class="k">doc_excerpt</span>
           <b data-testid="payload-text">{{ payload.doc_excerpt || '（无文本）' }}</b>
         </template>

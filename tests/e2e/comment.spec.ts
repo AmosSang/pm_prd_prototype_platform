@@ -121,6 +121,10 @@ function ensureCommentRepo() {
 ## 5.3 设置页 <!-- pa: page-settings -->
 
 设置页需求。
+
+## 5.4 通用说明
+
+这段没有任何锚点标记，验证任意段落可评论（指纹定位）。
 `,
   )
 
@@ -419,6 +423,8 @@ test.describe('T4.2 评论提交链路', () => {
     )
     expect(fj.target_type).toBe('page')
     expect(fj.css_path).toBe('body')
+    // 页面评论不采 outer_html（整页 HTML 无定位意义——T4.2 修订）
+    expect(fj.outer_html).toBe('')
     // 页面评论有整页截图但不框红（目标=页面根，框红无意义）
     expect(fj.screenshot).toBe(`shots/${cid}.png`)
     expect(fj.highlight_rect).toBeNull()
@@ -459,5 +465,43 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.scope).toBe('doc')
     // 文档评论无截图（目标是 PRD 段落，非原型）
     expect(fj.screenshot).toBeUndefined()
+  })
+
+  test('无锚点段落也可评论：指纹定位（doc_anchor_id 空）', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 5.4 通用说明的段落无锚点：hover 出「评论」按钮（右上，无「定位」）
+    const p = page
+      .getByTestId('prd-content')
+      .locator('p:not([data-pa])', { hasText: '这段没有任何锚点标记' })
+    await p.waitFor()
+    const box = (await p.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+    await expect(page.getByTestId('payload-target-type')).toHaveText('doc_block')
+    // 无锚点：doc_anchor_id 空标记 + doc_path（标题链）展示
+    await expect(page.getByTestId('payload-anchor')).toHaveText('（无锚点，指纹定位）')
+    await expect(page.getByTestId('payload-doc-path')).toHaveText('5.4 通用说明')
+
+    const data = await submitAndWait(page, '这段的通用说明需要补充适用范围')
+    const cid: string = data.comment_id
+    expect(data.git_pushed).toBe(true)
+
+    const fj = JSON.parse(
+      fs.readFileSync(
+        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
+        'utf-8',
+      ),
+    )
+    expect(fj.target_type).toBe('doc_block')
+    expect(fj.doc_anchor_id).toBe('')
+    // 指纹 = sha1(标题链|段落文本)[:16]
+    expect(fj.doc_block_fingerprint).toMatch(/^[0-9a-f]{16}$/)
+    // 无锚点是正常场景，不标「无 PRD 锚点关联」
+    expect(fj.doc_note).toBeUndefined()
+    expect(fj.doc_excerpt).toContain('这段没有任何锚点标记')
   })
 })

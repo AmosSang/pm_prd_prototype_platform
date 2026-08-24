@@ -511,9 +511,15 @@
   /** outer_html：目标元素 outerHTML + 最多 2 层元素祖先的开/闭标签包裹。
    * 设计（产品方案 §3.3「含 2–3 层祖先」）：祖先提供挂载上下文（与
    * css_path 互补），不含兄弟内容（兄弟噪音对 AI 定位无价值且撑爆体积）；
-   * body/html 不包（无意义）。超过 4KB 截断。 */
+   * body/html 不包（无意义）。超过 4KB 截断（含省略标记总长 ≤ LIMIT，
+   * schema 上限 4100 留余量）。 */
   var OUTER_HTML_LIMIT = 4096
   function outerHtmlWithAncestors(el) {
+    if (el === document.body || el === document.documentElement) {
+      // 页面评论（目标=页面根）不采 outer_html：整页 HTML 对定位无意义
+      // 且必然超长（实测触发 schema 400）
+      return ''
+    }
     var chain = []
     var p = el.parentElement
     while (p && p !== document.body && p.nodeType === 1 && chain.length < 2) {
@@ -526,7 +532,10 @@
     for (var j = chain.length - 1; j >= 0; j--) {
       s += '</' + chain[j].tagName.toLowerCase() + '>'
     }
-    if (s.length > OUTER_HTML_LIMIT) s = s.slice(0, OUTER_HTML_LIMIT) + '…(截断)'
+    if (s.length > OUTER_HTML_LIMIT) {
+      // 截断后总长（含 5 字符省略标记）必须 ≤ LIMIT，否则超过 schema 上限
+      s = s.slice(0, OUTER_HTML_LIMIT - 5) + '…(截断)'
+    }
     return s
   }
 
