@@ -4,10 +4,17 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
-import { getOverview, getPrd, listProjects, type ProjectOverview } from '../projects'
+import {
+  getOverview,
+  getPrd,
+  getReconcile,
+  listProjects,
+  type ProjectOverview,
+  type ReconcileDetail,
+} from '../projects'
 
 /**
- * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动。
+ * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动 + T3.3 对账。
  * 左：原型 iframe（:8081 独立 origin + sandbox + URL nonce，bridge.js 由代理注入）
  * 右：PRD markdown 渲染（markdown-it + 锚点插件，多文档 el-select 切换）
  * 中：可拖动分割条（pointer 事件，父级相对宽度）
@@ -17,6 +24,8 @@ import { getOverview, getPrd, listProjects, type ProjectOverview } from '../proj
  * T3.2 反向联动：文档段落 hover「定位」按钮 → 查页面地图（锚点 → 原型文件）
  * → 跨页先切 iframe src（等 READY）→ 发 HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
  * 跨文档：锚点不在当前文档时切文档再定位（正向反向共用）。
+ * T3.3 对账：顶栏提示条（匹配 · 缺失 · 未描述），点击拉明细弹窗
+ * （三态 + 重复 ID + 页面地图坏引用，数据来自服务端静态解析）。
  */
 
 const route = useRoute()
@@ -210,6 +219,41 @@ async function loadDoc(file: string) {
 
 watch(currentDoc, (f) => loadDoc(f))
 
+// ───────────────────────── T3.3 对账提示条 + 明细弹窗 ─────────────────────────
+const reconDetail = ref<ReconcileDetail | null>(null)
+const reconDialogVisible = ref(false)
+const reconLoading = ref(false)
+const reconTab = ref('missing')
+
+/** 打开明细弹窗：拉 /reconcile 全量明细。 */
+async function openReconcile() {
+  if (!overview.value) return
+  reconDialogVisible.value = true
+  reconLoading.value = true
+  try {
+    reconDetail.value = await getReconcile(overview.value.project.id)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '对账明细加载失败')
+    reconDialogVisible.value = false
+  } finally {
+    reconLoading.value = false
+  }
+}
+
+const reconSummary = computed(() => overview.value?.reconcile_summary || null)
+/** 有失配（任一附加检查非零）时提示条才可点/高亮 */
+const reconHasIssue = computed(() => {
+  const s = reconSummary.value
+  if (!s) return false
+  return (
+    s.missing_in_proto > 0 ||
+    s.undescribed > 0 ||
+    s.duplicate_prd > 0 ||
+    s.duplicate_proto > 0 ||
+    s.map_broken > 0
+  )
+})
+
 // ───────────────────────── 分割条拖动 ─────────────────────────
 // 左侧面板宽度百分比；pointer 捕获 + 全局 move/up，拖出条外也持续跟随。
 const leftPct = ref(50)
@@ -258,6 +302,25 @@ onBeforeUnmount(() => {
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
       <span class="meta">{{ slug }} · {{ overview.project.branch }}</span>
+      <!-- T3.3 对账提示条：匹配 · 缺失 · 未描述（点击看明细） -->
+      <span
+        v-if="reconSummary"
+        class="recon-bar"
+        :class="{ issue: reconHasIssue }"
+        data-testid="recon-bar"
+        role="button"
+        tabindex="0"
+        title="点击查看锚点对账明细"
+        @click="openReconcile"
+        @keydown.enter="openReconcile"
+      >
+        对账：{{ reconSummary.matched }} 匹配
+        <template v-if="reconSummary.missing_in_proto"> · {{ reconSummary.missing_in_proto }} 原型缺失</template>
+        <template v-if="reconSummary.undescribed"> · {{ reconSummary.undescribed }} 未描述</template>
+        <template v-if="reconSummary.duplicate_prd"> · {{ reconSummary.duplicate_prd }} PRD重复</template>
+        <template v-if="reconSummary.duplicate_proto"> · {{ reconSummary.duplicate_proto }} 原型重复</template>
+        <template v-if="reconSummary.map_broken"> · {{ reconSummary.map_broken }} 地图坏引用</template>
+      </span>
     </header>
 
     <div class="v-body" ref="containerEl">
@@ -336,6 +399,142 @@ onBeforeUnmount(() => {
     <p v-if="loadError" class="empty">{{ loadError }}</p>
     <p v-else class="empty">加载中…</p>
   </main>
+
+  <!-- T3.3 对账明细弹窗 -->
+  <el-dialog
+    v-model="reconDialogVisible"
+    title="锚点对账明细"
+    width="720px"
+    data-testid="recon-dialog"
+  >
+    <p v-if="reconLoading" class="empty">对账计算中…</p>
+    <template v-else-if="reconDetail">
+      <p class="recon-note">
+        共 {{ reconDetail.summary.matched }} 匹配 / {{ reconDetail.summary.missing_in_proto }} 原型缺失 /
+        {{ reconDetail.summary.undescribed }} 未描述
+        <template v-if="reconDetail.summary.duplicate_prd">
+          ；PRD 重复 ID {{ reconDetail.summary.duplicate_prd }} 组
+        </template>
+        <template v-if="reconDetail.summary.duplicate_proto">
+          ；原型重复 ID {{ reconDetail.summary.duplicate_proto }} 组
+        </template>
+        <template v-if="reconDetail.summary.map_broken">
+          ；页面地图坏引用 {{ reconDetail.summary.map_broken }} 条
+        </template>
+      </p>
+      <el-tabs v-model="reconTab">
+        <el-tab-pane
+          :label="`原型缺失（${reconDetail.missing_in_proto.length}）`"
+          name="missing"
+        >
+          <el-table
+            v-if="reconDetail.missing_in_proto.length"
+            :data="reconDetail.missing_in_proto"
+            size="small"
+            data-testid="recon-missing-table"
+          >
+            <el-table-column prop="id" label="锚点 ID" width="200">
+              <template #default="{ row }"><code>{{ row.id }}</code></template>
+            </el-table-column>
+            <el-table-column label="PRD 位置">
+              <template #default="{ row }">
+                {{ row.prd.doc_path || '（文档顶部）' }}
+                <span class="dim"> · {{ row.prd.file }}:{{ row.prd.line }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p v-else class="empty">无——PRD 里的锚点在原型中都有对应 data-pa</p>
+        </el-tab-pane>
+
+        <el-tab-pane
+          :label="`未描述（${reconDetail.undescribed.length}）`"
+          name="undescribed"
+        >
+          <el-table
+            v-if="reconDetail.undescribed.length"
+            :data="reconDetail.undescribed"
+            size="small"
+            data-testid="recon-undescribed-table"
+          >
+            <el-table-column prop="id" label="锚点 ID" width="200">
+              <template #default="{ row }"><code>{{ row.id }}</code></template>
+            </el-table-column>
+            <el-table-column label="原型位置">
+              <template #default="{ row }">
+                {{ row.proto.file }}
+                <span class="dim"> · {{ row.proto.css_path }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p v-else class="empty">无——原型里的 data-pa 都有 PRD 锚点描述</p>
+        </el-tab-pane>
+
+        <el-tab-pane :label="`匹配（${reconDetail.matched.length}）`" name="matched">
+          <el-table
+            v-if="reconDetail.matched.length"
+            :data="reconDetail.matched"
+            size="small"
+            data-testid="recon-matched-table"
+          >
+            <el-table-column prop="id" label="锚点 ID" width="200">
+              <template #default="{ row }"><code>{{ row.id }}</code></template>
+            </el-table-column>
+            <el-table-column label="PRD 位置">
+              <template #default="{ row }">
+                {{ row.prd.doc_path || '（文档顶部）' }}
+                <span class="dim"> · {{ row.prd.file }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="原型位置">
+              <template #default="{ row }">
+                {{ row.proto.file }}
+                <span class="dim"> · {{ row.proto.css_path }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p v-else class="empty">无匹配锚点</p>
+        </el-tab-pane>
+
+        <el-tab-pane
+          v-if="reconDetail.duplicate_prd.length || reconDetail.duplicate_proto.length || reconDetail.map_broken.length"
+          :label="`附加检查（${reconDetail.duplicate_prd.length + reconDetail.duplicate_proto.length + reconDetail.map_broken.length}）`"
+          name="extra"
+        >
+          <template v-if="reconDetail.duplicate_prd.length">
+            <h4 class="recon-sub">PRD 重复 ID（须全局唯一）</h4>
+            <ul class="recon-list">
+              <li v-for="d in reconDetail.duplicate_prd" :key="'p-' + d.id">
+                <code>{{ d.id }}</code>
+                <span v-for="(o, i) in d.occurrences" :key="i" class="dim">
+                  · {{ o.file }}:{{ o.line }}（{{ o.doc_path || '文档顶部' }}）
+                </span>
+              </li>
+            </ul>
+          </template>
+          <template v-if="reconDetail.duplicate_proto.length">
+            <h4 class="recon-sub">原型重复 ID（跨页面/元素复用同一 ID）</h4>
+            <ul class="recon-list">
+              <li v-for="d in reconDetail.duplicate_proto" :key="'o-' + d.id">
+                <code>{{ d.id }}</code>
+                <span v-for="(o, i) in d.occurrences" :key="i" class="dim">
+                  · {{ o.file }}（{{ o.css_path }}）
+                </span>
+              </li>
+            </ul>
+          </template>
+          <template v-if="reconDetail.map_broken.length">
+            <h4 class="recon-sub">页面地图坏引用（原型文件不存在）</h4>
+            <ul class="recon-list">
+              <li v-for="m in reconDetail.map_broken" :key="m.proto">
+                <code>{{ m.proto }}</code>
+                <span class="dim"> · 页面「{{ m.name }}」（锚点 {{ m.anchor }}）</span>
+              </li>
+            </ul>
+          </template>
+        </el-tab-pane>
+      </el-tabs>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -354,6 +553,34 @@ onBeforeUnmount(() => {
 }
 .v-head .back { color: #3b82f6; text-decoration: none; font-size: 13px; }
 .v-head .meta { color: #999; font-size: 12px; }
+
+/* T3.3 对账提示条 */
+.v-head .recon-bar {
+  margin-left: auto;
+  font-size: 12px;
+  color: #2e9e44;
+  background: #f0f9eb;
+  border: 1px solid #e1f3d8;
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.v-head .recon-bar:hover { border-color: #b3e19d; }
+.v-head .recon-bar.issue {
+  color: #b45200;
+  background: #fdf6ec;
+  border-color: #faecd8;
+}
+.v-head .recon-bar.issue:hover { border-color: #f3d19e; }
+
+/* 对账明细弹窗 */
+.recon-note { margin: 0 0 12px; font-size: 13px; color: #57606a; }
+.recon-sub { margin: 14px 0 6px; font-size: 13px; color: #24292f; }
+.recon-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 2; }
+.recon-list .dim { color: #999; font-size: 12px; }
+.dim { color: #999; font-size: 12px; }
 
 .v-body {
   flex: 1;
