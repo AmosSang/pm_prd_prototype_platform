@@ -93,8 +93,20 @@ test.describe('T3.1 锚点正向联动', () => {
     await page.getByTestId('form-submit').click()
     await expect(page.getByText('绑定成功')).toBeVisible({ timeout: 30_000 })
 
-    await page.getByTestId('open-project').first().click()
-    await expect(page).toHaveURL(/\/project\//)
+    // 按 slug 精确定位（并发 worker 下同名项目卡片有多张、列表顶部
+    // 归属不确定——slug 数据库唯一，稳）。先从任一同名卡片读出本用例
+    // 刚绑定的 slug（列表按 id 倒序，最新在前），再按 slug 定位卡片。
+    const mySlug = (await page
+      .locator('.card', { hasText: '锚点E2E项目' })
+      .first()
+      .locator('.meta')
+      .textContent())!.split(' ')[0]
+    await page
+      .locator('.card', { hasText: '锚点E2E项目' })
+      .filter({ hasText: mySlug })
+      .getByTestId('open-project')
+      .click()
+    await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
     // 双侧就绪：iframe READY 只代表左侧原型好了；右侧 PRD 是异步 fetch +
     // markdown 渲染，不等它会导致后续 ANCHOR_CLICK 早于 PRD 渲染到达——
@@ -146,29 +158,57 @@ test.describe('T3.1 锚点正向联动', () => {
     const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
     const icon = protoFrame.locator('.pp-anchor-icon')
 
-    // hover 锚点 → icon 显示
-    await protoFrame.locator('[data-pa="page-login"]').hover()
+    // hover 组件级锚点（input，无嵌套歧义）：hover page-login 这类容器
+    // 锚点时，落点随渲染时序可能落在内部 form/input 的地盘（此前 iframe
+    // 内事件探针实测过落点 FORM），iconTarget 变成 login-form → click
+    // 高亮的是 h4 而非 h2，断言会「假失败」（单跑/全量落点不同 → 偶发）。
+    await protoFrame.locator('[data-pa="login-account"]').hover()
     await expect(icon).toBeVisible({ timeout: 5_000 })
 
-    // 记住 icon 坐标（移开后 positionIcon 不会变——目标没换）
-    const iconBox = await icon.boundingBox()
-    expect(iconBox).not.toBeNull()
+    // 鼠标移出原型 iframe（宿主页 v-head 区域）→ 进入 1s 渐隐宽限期。
+    // 关键 1：「移开」必须真正离开 iframe——fixture 的 page-login section
+    //   高 120vh 铺满整个 iframe 视口，iframe 内任何点都是它的地盘
+    //   （closest 必命中，等价没离开）；宿主页 (316,60) 在 v-head 内、
+    //   iframe 上边缘之上，稳定在 iframe 外（body margin 归零前用过的
+    //   (5,300) 是靠 body 默认 margin 8px 恰好把 iframe x 推到 8 的巧合）。
+    // 关键 2：移开后【立刻】接住——中间不能隔着断言轮询（轮询在高负载
+    //   下可能耗掉整个 1s 宽限期，fadeTimer 到期 hideIcon 后点击落空）。
+    // 关键 3：接住/点击一律用 locator（icon.hover()/icon.click()）实时
+    //   解析坐标，不用 boundingBox 绝对坐标快照——宿主页布局存在异步
+    //   位移（曾因 body margin 产生 16px 可滚动空隙：hover 超高元素时
+    //   Playwright 把宿主页滚 8px、随后回滚，iframe 平移 16px 使旧坐标
+    //   点击落在 icon 外）。icon.hover() 的 stable 检查还会等布局稳定
+    //   后再移动，双保险。渐隐「会隐藏」的行为由下一个用例覆盖。
+    await page.mouse.move(316, 60)
+    await icon.hover()
 
-    // 鼠标移到非锚点空白处 → 进入 1s 渐隐宽限期（icon 仍 display:flex）
-    await page.mouse.move(5, 300)
-    // 渐隐已启动：fading class 出现（证明宽限期生效、icon 未立即隐藏）
-    await expect(icon).toHaveClass(/pp-anchor-icon--fading/)
-
-    // 渐隐中鼠标直达 icon 中心（mouse.move 无 actionability 检查，
-    // 不受负载影响慢过 1s 宽限窗口——hover() 会等稳定性可能超时）
-    await page.mouse.move(iconBox!.x + iconBox!.width / 2, iconBox!.y + iconBox!.height / 2)
+    // 接住成功：icon 仍显示（未 hideIcon）且 fading class 被移除
+    await expect(icon).toBeVisible()
     await expect(icon).not.toHaveClass(/pp-anchor-icon--fading/)
 
-    // 接住状态下点击 → 正常发出 ANCHOR_CLICK，右侧高亮。
-    // click 用 icon 挂靠的锚点（page-login），不受途中 mouseover 切换影响
-    await page.mouse.click(iconBox!.x + iconBox!.width / 2, iconBox!.y + iconBox!.height / 2)
-    const target = page.getByTestId('prd-content').locator('h2[data-pa="page-login"]')
-    await expect(target).toHaveClass(/anchor-highlight/, { timeout: 3_000 })
+    // 接住状态下点击 → 正常发出 ANCHOR_CLICK，右侧高亮（login-account）
+    await icon.click()
+    const target = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    try {
+      await expect(target).toHaveClass(/anchor-highlight/, { timeout: 3_000 })
+    } catch (err) {
+      // 失败现场采集（排障用，成功路径零开销）
+      const dbg = await icon
+        .evaluate((el) => ({
+          paTarget: (el as HTMLElement).dataset.paTarget ?? null,
+          cls: el.className,
+          display: getComputedStyle(el).display,
+        }))
+        .catch((e) => ({ err: String(e) }))
+      const host = await page
+        .evaluate(() => ({
+          highlighted: Array.from(document.querySelectorAll('.anchor-highlight')).map((n) => n.tagName + '[' + (n as HTMLElement).dataset.pa + ']'),
+          toast: Array.from(document.querySelectorAll('.el-message')).map((n) => n.textContent?.trim()),
+        }))
+        .catch((e) => ({ err: String(e) }))
+      console.log('[fade-dbg]', JSON.stringify({ icon: dbg, host }))
+      throw err
+    }
   })
 
   test('渐隐宽限期：1s 内不接住则 icon 完整隐藏', async ({ page }) => {
@@ -178,8 +218,9 @@ test.describe('T3.1 锚点正向联动', () => {
     await protoFrame.locator('[data-pa="page-login"]').hover()
     await expect(icon).toBeVisible({ timeout: 5_000 })
 
-    // 移到空白处且不回来——1s 宽限期过后 icon 隐藏（display:none）
-    await page.mouse.move(5, 300)
+    // 移出 iframe（v-head 区域，见上一用例注释）且不回来——
+    // 1s 宽限期过后 icon 隐藏（display:none）
+    await page.mouse.move(316, 60)
     await expect(icon).toBeHidden({ timeout: 3_000 })
 
     // 隐藏后再次 hover 锚点：正常重新显示（状态机可复活）
@@ -255,7 +296,10 @@ test.describe('T3.1 临时同步按钮', () => {
     await expect(page.getByText('已同步到最新')).toBeVisible({ timeout: 30_000 })
 
     // 打开查看器：新文档出现在下拉
-    await page.getByTestId('open-project').first().click()
+    // 按项目名精确定位卡片（.first() 在并发 worker 下会点到别的用例
+    // 刚绑定的项目——多个绑定用例并行时列表顶部归属不确定）
+    const myCard = page.locator('.card', { hasText: projName })
+    await myCard.locator('[data-testid^="open-project"]').click()
     await expect(page).toHaveURL(/\/project\//)
     await page.getByTestId('doc-select').click()
     await expect(page.getByRole('option', { name: 'prd/新需求.md' })).toBeVisible()
