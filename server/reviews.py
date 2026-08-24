@@ -266,6 +266,9 @@ def _build_comment_json(
         cj["doc_block_fingerprint"] = _fingerprint(doc_path, excerpt)
         if doc:
             cj["doc_file"] = doc["doc_file"]
+        elif str(payload.get("doc_file") or ""):
+            # 无锚点段落：前端携带当前文档路径（定位/文档角标匹配用）
+            cj["doc_file"] = str(payload["doc_file"])
     elif doc:
         # DOM/页面评论：用 anchor_id（或 nearest）查 PRD 锚点表命中段落
         cj["doc_anchor_id"] = doc["doc_anchor_id"]

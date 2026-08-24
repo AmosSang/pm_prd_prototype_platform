@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   batchStatus,
@@ -18,16 +18,23 @@ import {
  * - 筛选：宿主类型（全部/原型/文档）+ 状态（四态）——本地筛（数据量小即时切换）
  * - 批量操作：勾选 → 确认（待确认→已确认待修改）/ 忽略；每条一个落仓任务
  * - 编辑/删除规则（产品方案 §4.5）：作者本人 + 待确认/已确认待修改态才可操作
+ * - 每条评论「定位」按钮（T4.4 修订）：emit locate → Viewer 定位文档段落/
+ *   原型元素（跨页/跨文档切换 + 高亮闪烁）
+ * - focusKey（文档角标点击传入）：展开对应合并组 + 滚动 + 高亮 2s
  */
 const props = defineProps<{
   projectId: number
   comments: CommentItem[]
   currentUserEmail: string
+  focusKey?: string
 }>()
 
 const emit = defineEmits<{
   refresh: []
+  locate: [comment: CommentItem]
 }>()
+
+const rootEl = ref<HTMLElement | null>(null)
 
 const STATUS_OPTIONS: CommentStatus[] = ['待确认', '已确认待修改', '已修改', '忽略']
 const EDITABLE: CommentStatus[] = ['待确认', '已确认待修改']
@@ -44,10 +51,17 @@ const editContent = ref('')
 const editPriority = ref('P2')
 const editScope = ref('prototype')
 
-/** 位置键：同页面同锚点算同位置（合并展示口径） */
+/** 位置键：同页面同锚点算同位置（合并展示口径）。
+ * doc 分支与 Viewer.docLocKeyOf 同口径（payload.doc_anchor_id 优先，
+ * 无锚点退 doc_path）——文档段落角标匹配与 focusKey 定位都靠它对齐。 */
 function locKey(c: CommentItem): string {
   if (c.target_type === 'doc_block') {
-    return 'doc|' + (c.payload.doc_file || '') + '|' + (c.anchor_id || c.payload.doc_path || '')
+    return (
+      'doc|' +
+      (c.payload.doc_file || '') +
+      '|' +
+      (c.payload.doc_anchor_id || c.payload.doc_path || '')
+    )
   }
   if (c.target_type === 'page') return 'page|' + c.prototype_page
   return (
@@ -218,10 +232,33 @@ watch([hostFilter, statusFilter], () => {
   const visible = new Set(filtered.value.map((c) => c.comment_id))
   checked.value = new Set([...checked.value].filter((cid) => visible.has(cid)))
 })
+
+// focusKey（文档段落角标点击）：展开对应合并组 + 滚动到该位置 + 高亮 2s。
+// key 值含 | 与中文（不做属性选择器查询，遍历比较 dataset 稳）
+watch(
+  () => props.focusKey,
+  (k) => {
+    if (!k) return
+    const s = new Set(expanded.value)
+    s.add(k)
+    expanded.value = s
+    nextTick(() => {
+      const locs = rootEl.value?.querySelectorAll<HTMLElement>('[data-lock]') || []
+      for (const loc of locs) {
+        if (loc.dataset.lock === k) {
+          loc.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          loc.classList.add('loc-focus')
+          setTimeout(() => loc.classList.remove('loc-focus'), 2000)
+          return
+        }
+      }
+    })
+  },
+)
 </script>
 
 <template>
-  <div class="drawer" data-testid="comment-drawer">
+  <div ref="rootEl" class="drawer" data-testid="comment-drawer">
     <!-- 工具栏 -->
     <div class="bar">
       <span class="bar-title">评论（{{ filtered.length }}）</span>
@@ -268,7 +305,7 @@ watch([hostFilter, statusFilter], () => {
       <p v-if="!filtered.length" class="empty">暂无评论——开启评论模式后在原型或文档上评论</p>
       <section v-for="g in groups" :key="g.key" class="group">
         <h4 class="group-title" data-testid="comment-group-title">{{ g.title }}</h4>
-        <div v-for="loc in g.locs" :key="loc.key" class="loc">
+        <div v-for="loc in g.locs" :key="loc.key" class="loc" :data-lock="loc.key">
           <!-- 位置行（多条时显示 ×N 合并角标，点开折叠） -->
           <div
             class="loc-head"
@@ -310,9 +347,20 @@ watch([hostFilter, statusFilter], () => {
                   <span class="scope">{{ c.scope === 'prototype' ? '原型' : c.scope === 'doc' ? '文档' : '两侧' }}</span>
                   <span class="author">{{ c.author_name }}</span>
                   <span class="time">{{ c.created_at.slice(0, 16).replace('T', ' ') }}</span>
-                  <span v-if="canEdit(c)" class="ops">
-                    <button class="op" data-testid="edit-comment" @click="startEdit(c)">编辑</button>
-                    <button class="op danger" data-testid="del-comment" @click="onDelete(c)">删除</button>
+                  <span class="ops">
+                    <!-- T4.4 定位：文档评论→段落高亮；原型评论→切页+元素闪烁 -->
+                    <button
+                      class="op"
+                      :data-testid="`locate-${c.comment_id}`"
+                      title="定位到评论目标（文档段落 / 原型元素）"
+                      @click="emit('locate', c)"
+                    >
+                      定位
+                    </button>
+                    <template v-if="canEdit(c)">
+                      <button class="op" data-testid="edit-comment" @click="startEdit(c)">编辑</button>
+                      <button class="op danger" data-testid="del-comment" @click="onDelete(c)">删除</button>
+                    </template>
                   </span>
                 </div>
                 <p class="content">{{ c.payload.content }}</p>
@@ -411,6 +459,13 @@ watch([hostFilter, statusFilter], () => {
   font-weight: 600;
 }
 .loc { margin-bottom: 4px; }
+/* focusKey 定位高亮（文档角标点击进来时 2s） */
+.loc.loc-focus {
+  background: #fff3d6;
+  box-shadow: 0 0 0 2px #ffd66e;
+  border-radius: 6px;
+  padding: 2px 4px;
+}
 .loc-head {
   display: inline-flex;
   align-items: center;

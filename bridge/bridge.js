@@ -447,9 +447,12 @@
     document.head.appendChild(highlightStyleEl)
   }
 
-  function highlightAnchor(anchorId) {
-    if (!anchorId) return false
-    var el = document.querySelector('[data-pa="' + anchorId + '"]')
+  function highlightAnchor(anchorId, cssPath) {
+    // 定位目标：锚点优先，缺省时按 cssPath（T4.4 评论定位——无锚点 dom
+    // 评论用采集时的 css_path；page 评论传 'body' 整页闪烁）
+    var el = null
+    if (anchorId) el = document.querySelector('[data-pa="' + anchorId + '"]')
+    if (!el && cssPath) el = queryTarget(cssPath)
     if (!el) return false
     ensureHighlightStyle()
     // 滚动到视口中部（平滑），再闪烁
@@ -750,32 +753,35 @@
     })
   }
 
-  // 滚动/缩放后重定位可见角标（与锚点 icon 同款 200ms debounce 策略；
-  // 出视口的锚点直接隐藏角标，回视口时滚动事件会再触发重定位）
+  /** 角标重定位（滚动/截图恢复共用）：锚点在视口内 → 显示+重定位；
+   * 不在视口/已从 DOM 移除 → 隐藏。 */
+  function repositionBadges() {
+    Object.keys(badgeEls).forEach(function (aid) {
+      var el = badgeEls[aid]
+      var anchorEl = document.querySelector('[data-pa="' + aid + '"]')
+      if (!anchorEl) {
+        el.style.display = 'none'
+        return
+      }
+      var r = anchorEl.getBoundingClientRect()
+      var vh = window.innerHeight || document.documentElement.clientHeight
+      if (r.bottom > 0 && r.top < vh) {
+        el.style.display = ''
+        positionBadge(el, anchorEl)
+      } else {
+        el.style.display = 'none'
+      }
+    })
+  }
+
+  // 滚动后重定位（与锚点 icon 同款 200ms debounce 策略）
   var badgeScrollTimer = null
   window.addEventListener(
     'scroll',
     function () {
       if (!Object.keys(badgeEls).length) return
       clearTimeout(badgeScrollTimer)
-      badgeScrollTimer = setTimeout(function () {
-        Object.keys(badgeEls).forEach(function (aid) {
-          var el = badgeEls[aid]
-          var anchorEl = document.querySelector('[data-pa="' + aid + '"]')
-          if (!anchorEl) {
-            el.style.display = 'none'
-            return
-          }
-          var r = anchorEl.getBoundingClientRect()
-          var vh = window.innerHeight || document.documentElement.clientHeight
-          if (r.bottom > 0 && r.top < vh) {
-            el.style.display = ''
-            positionBadge(el, anchorEl)
-          } else {
-            el.style.display = 'none'
-          }
-        })
-      }, 200)
+      badgeScrollTimer = setTimeout(repositionBadges, 200)
     },
     { capture: true, passive: true },
   )
@@ -830,14 +836,21 @@
     } else if (msg.type === 'SET_COMMENT_BADGES') {
       setCommentBadges(msg.badges || {})
     } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
-      // 反向联动（T3.2）：false 表示本页没有该锚点（正常不会发生——
-      // 宿主已按页面地图切页；万一落空回 ACK 让宿主 toast 提示）
-      var hit = highlightAnchor(msg.anchorId)
+      // 反向联动（T3.2）/ 评论定位（T4.4）：false 表示本页没找到目标
+      // （锚点或 cssPath 都未命中；万一落空回 ACK 让宿主 toast 提示）
+      var hit = highlightAnchor(msg.anchorId, msg.cssPath)
       send('HIGHLIGHT_ACK', { anchorId: msg.anchorId, hit: hit })
     } else if (msg.type === 'TAKE_SCREENSHOT') {
       var target = msg.cssPath ? queryTarget(msg.cssPath) : null
+      // 截图前隐藏平台注入物（锚点 icon / 评论角标）——这些 UI 会进截图
+      // 干扰 AI 分析（产品反馈）；截完恢复角标（icon 是 hover 驱动，自然恢复）
+      hideIcon()
+      Object.keys(badgeEls).forEach(function (aid) {
+        badgeEls[aid].style.display = 'none'
+      })
       captureFullPage(target)
         .then(function (result) {
+          repositionBadges()
           // Blob 经 postMessage 结构化克隆直接回传
           send('SCREENSHOT_RESULT', {
             requestId: msg.requestId,
@@ -848,6 +861,7 @@
           })
         })
         .catch(function (err) {
+          repositionBadges()
           send('SCREENSHOT_ERROR', { requestId: msg.requestId, error: String(err && err.message) })
         })
     }

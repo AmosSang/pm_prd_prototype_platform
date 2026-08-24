@@ -225,9 +225,9 @@ function onMessage(event: MessageEvent) {
     syncBadges()
     // 跨页定位：切页后等 READY 再发 HIGHLIGHT_ANCHOR（技术方案 §2.5）
     if (pendingHighlight.value) {
-      const anchorId = pendingHighlight.value
-      pendingHighlight.value = ''
-      postHighlight(anchorId)
+      const target = pendingHighlight.value
+      pendingHighlight.value = null
+      postHighlight(target)
     }
   }
   if (msg.type === 'ANCHOR_REPORT' && Array.isArray(msg.anchors)) {
@@ -278,6 +278,7 @@ function onMessage(event: MessageEvent) {
 // ───────────────────────── T4.4 评论抽屉 + 原型角标 ─────────────────────────
 const drawerOpen = ref(false)
 const comments = ref<CommentItem[]>([])
+const drawerFocusKey = ref('') // 文档角标点击 → 抽屉定位到的位置 key
 
 async function refreshComments() {
   if (!overview.value) return
@@ -292,6 +293,111 @@ async function refreshComments() {
 function toggleDrawer() {
   drawerOpen.value = !drawerOpen.value
   if (drawerOpen.value) refreshComments()
+}
+
+/** doc_block 评论的位置 key（与 CommentDrawer.locKey doc 分支同口径：
+ * doc_file + 锚点或标题路径——文档段落角标匹配、抽屉定位共用）。 */
+function docLocKeyOf(c: CommentItem): string {
+  return (
+    'doc|' +
+    (c.payload.doc_file || '') +
+    '|' +
+    (c.payload.doc_anchor_id || c.payload.doc_path || '')
+  )
+}
+
+/** ── 评论定位（T4.4，每条评论的「定位」按钮）──
+ * doc_block → 切到评论所在文档，锚点/文本匹配段落高亮 2s；
+ * dom/page → 切到评论所在原型页（等 READY），锚点或 css_path 闪烁
+ * （page 评论 cssPath='body' 整页闪烁）。 */
+async function locateComment(c: CommentItem) {
+  if (c.target_type === 'doc_block') {
+    const docFile = (c.payload.doc_file as string) || ''
+    const flash = () => {
+      const anchorId = (c.payload.doc_anchor_id as string) || ''
+      let el = anchorId ? findDocAnchor(anchorId) : null
+      if (!el) {
+        // 无锚点段落：按 doc_excerpt 文本匹配块级元素（采集时同款文本）
+        el = findDocBlockByExcerpt((c.payload.doc_excerpt as string) || '')
+      }
+      if (el) flashDocAnchor(el)
+      else ElMessage.info('评论对应的文档段落未找到（内容可能已被修改）')
+    }
+    if (docFile && docFile !== currentDoc.value && overview.value?.docs.includes(docFile)) {
+      currentDoc.value = docFile
+      await nextTick()
+      await new Promise((r) => setTimeout(r, 80))
+    }
+    flash()
+    return
+  }
+  // dom/page：评论存的是剥掉 prototype/ 前缀的页面口径
+  const entry = overview.value?.proto_entries.find(
+    (e) => e === 'prototype/' + (c.prototype_page || ''),
+  )
+  const targetEntry = entry || currentEntry.value
+  if (!targetEntry) return
+  const target: HighlightTarget =
+    c.target_type === 'page'
+      ? { cssPath: 'body' }
+      : c.anchor_id
+        ? { anchorId: c.anchor_id }
+        : { cssPath: (c.payload.css_path as string) || 'body' }
+  if (targetEntry !== currentEntry.value) {
+    pendingHighlight.value = target
+    ready.value = false
+    currentEntry.value = targetEntry
+  } else {
+    postHighlight(target)
+  }
+}
+
+/** 按 doc_excerpt 匹配文档块级元素（无锚点 doc 评论定位）。 */
+function findDocBlockByExcerpt(excerpt: string): HTMLElement | null {
+  if (!excerpt) return null
+  const needle = excerpt.replace(/…$/, '')
+  const container = document.querySelector('[data-testid="prd-content"]')
+  const blocks = container?.querySelectorAll<HTMLElement>(DOC_BLOCK_SELECTOR) || []
+  for (const b of blocks) {
+    const text = (b.textContent || '').replace(/\s+/g, ' ').trim()
+    if (text && text.startsWith(needle)) return b
+  }
+  return null
+}
+
+/** ── 文档段落评论数量角标（T4.4，产品需求：hover 段落时「评论」按钮附近
+ * 固定显示数量角标；点击打开抽屉并定位到该位置的评论组）── */
+const docBadge = ref({ count: 0, locKey: '' })
+const docBadgeEl = ref<HTMLElement | null>(null)
+
+/** hover 段落时更新文档角标（在 onDocMouseover 里调用）。 */
+function updateDocBadge(host: Element) {
+  const anchorId = host.getAttribute('data-pa') || ''
+  const key = 'doc|' + currentDoc.value + '|' + (anchorId || headingPathOf(host))
+  const n = comments.value.filter(
+    (c) => c.target_type === 'doc_block' && docLocKeyOf(c) === key,
+  ).length
+  docBadge.value = { count: n, locKey: key }
+  if (!n) return
+  // 角标定位：段落右上角（相对 prd-scroll 容器，随滚动正确）
+  nextTick(() => {
+    const scrollEl = host.closest('.prd-scroll')
+    const badgeEl = docBadgeEl.value
+    if (!scrollEl || !badgeEl) return
+    const hr = host.getBoundingClientRect()
+    const sr = scrollEl.getBoundingClientRect()
+    badgeEl.style.left = hr.right - sr.left + scrollEl.scrollLeft - 30 + 'px'
+    badgeEl.style.top = hr.top - sr.top + scrollEl.scrollTop - 8 + 'px'
+  })
+}
+
+/** 点击文档角标：打开抽屉 + 定位到该位置评论组（展开+滚动+高亮）。 */
+function clickDocBadge() {
+  if (!docBadge.value.count) return
+  drawerOpen.value = true
+  refreshComments().then(() => {
+    drawerFocusKey.value = docBadge.value.locKey
+  })
 }
 
 /** 角标下发：当前页（entry 剥 prototype/ 前缀对齐评论 prototype_page 口径）
@@ -370,14 +476,20 @@ function cssEscape(s: string): string {
 // ───────────────────────── T3.2 反向联动 ─────────────────────────
 // 文档段落 hover「定位」按钮 → 原型侧滚动闪烁。跨页：查页面地图（页面锚点
 // → 原型文件）先切 iframe src，等 READY 后发 HIGHLIGHT_ANCHOR。
-const pendingHighlight = ref('')
+// T4.4 评论定位共用：目标可为 {anchorId}（锚点）或 {cssPath}（无锚点
+// dom 评论的 css_path / page 评论的 'body' 整页闪烁）。
+interface HighlightTarget {
+  anchorId?: string
+  cssPath?: string
+}
+const pendingHighlight = ref<HighlightTarget | null>(null)
 
-function postHighlight(anchorId: string) {
+function postHighlight(target: HighlightTarget) {
   // targetOrigin '*'：sandbox iframe（无 allow-same-origin）的 origin 是
   // 不透明 "null"，指定具体 origin 会被浏览器拒发。安全靠 bridge 侧
   // origin + nonce 双重校验（技术方案 §2.2，与反向消息同规约）
   iframeEl.value?.contentWindow?.postMessage(
-    { type: 'HIGHLIGHT_ANCHOR', anchorId, nonce },
+    { type: 'HIGHLIGHT_ANCHOR', anchorId: target.anchorId, cssPath: target.cssPath, nonce },
     '*',
   )
 }
@@ -395,11 +507,11 @@ function locateAnchor(anchorId: string) {
   }
   if (targetEntry !== currentEntry.value) {
     // 跨页：切 src（iframe 重载 → bridge READY → onMessage 里补发定位）
-    pendingHighlight.value = anchorId
+    pendingHighlight.value = { anchorId }
     ready.value = false
     currentEntry.value = targetEntry
   } else {
-    postHighlight(anchorId)
+    postHighlight({ anchorId })
   }
 }
 
@@ -419,6 +531,7 @@ function onDocMouseover(e: MouseEvent) {
   const host = docHostOf(e.target)
   if (!host) return
   host.classList.add('pa-locate-hover')
+  updateDocBadge(host) // T4.4 文档段落评论数量角标
 }
 
 function onDocMouseout(e: MouseEvent) {
@@ -496,6 +609,8 @@ function openDocComment(host: Element) {
     doc_anchor_id: anchorId,
     doc_excerpt: excerpt,
     doc_path: headingPathOf(host),
+    // 当前文档路径：无锚点评论的定位/文档角标匹配依据（服务端落 doc_file）
+    doc_file: currentDoc.value,
   }
 }
 
@@ -738,6 +853,17 @@ onBeforeUnmount(() => {
           </p>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <article v-else class="markdown-body" data-testid="prd-content" v-html="prdHtml" />
+          <!-- T4.4 文档段落评论数量角标：hover 有评论的段落时出现于右上角 -->
+          <div
+            v-if="docBadge.count"
+            ref="docBadgeEl"
+            class="doc-comment-badge"
+            data-testid="doc-comment-badge"
+            title="查看该段落的评论"
+            @click="clickDocBadge"
+          >
+            {{ docBadge.count > 99 ? '99+' : docBadge.count }}
+          </div>
         </div>
       </section>
     </div>
@@ -748,7 +874,9 @@ onBeforeUnmount(() => {
       :project-id="overview.project.id"
       :comments="comments"
       :current-user-email="currentUser?.email || ''"
+      :focus-key="drawerFocusKey"
       @refresh="refreshComments"
+      @locate="locateComment"
     />
   </main>
 
@@ -1042,7 +1170,28 @@ onBeforeUnmount(() => {
   flex: 1;
   overflow-y: auto;
   padding: 20px 28px;
+  position: relative; /* T4.4 文档段落评论角标的定位基座 */
 }
+
+/* T4.4 文档段落评论数量角标（hover 有评论的段落时右上角） */
+.doc-comment-badge {
+  position: absolute;
+  z-index: 20;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.doc-comment-badge:hover { background: #c93a3f; }
 .prd .empty { color: #999; }
 
 .markdown-body {

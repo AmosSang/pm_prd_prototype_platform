@@ -648,4 +648,111 @@ test.describe('T4.4 评论列表抽屉', () => {
     await expect(page.getByTestId('comment-drawer')).toBeVisible()
     await expect(page.getByTestId('loc-count')).toHaveText('×2')
   })
+
+  test('截图隐藏注入物：角标截图时隐藏、提交后恢复（截图内无角标需人眼核验）', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 第 1 条提交 → 角标 ×1 出现
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await submitAndWait(page, '截图隐藏测试 1')
+    await page.getByTestId('comment-done').click()
+    const badge = protoFrame.locator('.pp-comment-badge')
+    await expect(badge).toBeVisible({ timeout: 10_000 })
+    await expect(badge).toHaveText('1')
+
+    // 第 2 条提交（截图时角标被隐藏）→ 提交后角标恢复并显示 ×2
+    // （若 bridge 不恢复，角标会保持 display:none——此断言即恢复逻辑的回归）
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await submitAndWait(page, '截图隐藏测试 2')
+    await page.getByTestId('comment-done').click()
+    await expect(badge).toHaveText('2', { timeout: 10_000 })
+    await expect(badge).toBeVisible()
+  })
+})
+
+// ═══════════════════ T4.4 评论定位 + 文档段落角标 ═══════════════════
+
+test.describe('T4.4 评论定位与文档角标', () => {
+  test('定位按钮：dom 评论 → 原型元素闪烁；page 评论 → 整页闪烁', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // dom 评论（有锚点）
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d1 = await submitAndWait(page, '定位测试 dom 评论')
+    await page.getByTestId('comment-done').click()
+    // page 评论
+    await page.getByTestId('comment-page-btn').click()
+    const d2 = await submitAndWait(page, '定位测试页面评论')
+    await page.getByTestId('comment-done').click()
+    await Promise.all([
+      waitForGitLog(cloneDirOf(page), `comment: ${d1.comment_id} 创建`),
+      waitForGitLog(cloneDirOf(page), `comment: ${d2.comment_id} 创建`),
+    ])
+
+    // 打开抽屉 → 点 dom 评论「定位」→ 目标元素闪烁（pp-anchor-flash，1.6s 窗口内断言）
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await page.getByTestId(`locate-${d1.comment_id}`).click()
+    await expect(
+      protoFrame.locator('[data-pa="login-account"]'),
+    ).toHaveClass(/pp-anchor-flash/, { timeout: 3_000 })
+
+    // 点 page 评论「定位」→ body 整页闪烁
+    await page.getByTestId(`locate-${d2.comment_id}`).click()
+    await expect(protoFrame.locator('body')).toHaveClass(/pp-anchor-flash/, { timeout: 3_000 })
+  })
+
+  test('定位按钮：doc 评论 → 文档段落高亮（无锚点段落按文本匹配）', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 无锚点段落（5.4 通用说明）doc 评论
+    const p = page
+      .getByTestId('prd-content')
+      .locator('p:not([data-pa])', { hasText: '这段没有任何锚点标记' })
+    await p.waitFor()
+    const box = (await p.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+    const d = await submitAndWait(page, '定位测试文档评论')
+    await page.getByTestId('comment-done').click()
+    await waitForGitLog(cloneDirOf(page), `comment: ${d.comment_id} 创建`)
+
+    // 抽屉 → 定位 → 该段落高亮（anchor-highlight class）
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await page.getByTestId(`locate-${d.comment_id}`).click()
+    await expect(p).toHaveClass(/anchor-highlight/, { timeout: 3_000 })
+  })
+
+  test('文档段落角标：hover 显示数量 → 点击开抽屉并定位到该组', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 有锚点段落（li login-account）doc 评论 ×2
+    const li = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    for (const i of [1, 2]) {
+      const box = (await li.boundingBox())!
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      await page.mouse.click(box.x + box.width - 40, box.y + 8)
+      await submitAndWait(page, `文档角标测试 ${i}`)
+      await page.getByTestId('comment-done').click()
+    }
+    await waitForGitLog(cloneDirOf(page), `comment: `)
+
+    // hover 段落 → 角标显示 ×2
+    const box = (await li.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    const badge = page.getByTestId('doc-comment-badge')
+    await expect(badge).toBeVisible({ timeout: 5_000 })
+    await expect(badge).toHaveText('2')
+
+    // 点击角标 → 抽屉打开 + 定位组高亮（loc-focus）
+    await badge.click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible({ timeout: 5_000 })
+    await expect(page.locator('.loc.loc-focus')).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByTestId('loc-count')).toHaveText('×2')
+  })
 })
