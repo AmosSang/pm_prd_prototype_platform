@@ -469,11 +469,14 @@ def edit_comment(cid: str):
     """作者编辑（产品方案 §4.5 编辑规则）：仅作者 + 待确认/已确认待修改态。
 
     可改 content / priority / scope；DB 先更新，文件修改入队（COMMIT_EDIT，
-    tracked 文件在 worker 内串行改）。
+    tracked 文件在 worker 内串行改）。项目关闭可评论时拒绝（写 reviews/
+    的操作都在拦截范围——开关的目的是消除双写窗口）。
     """
     c = _get_live_comment(cid)
     if not c:
         return jsonify(code=404, msg="评论不存在"), 404
+    if not c.project.commentable:
+        return jsonify(code=400, msg="项目已关闭评论，无法编辑"), 400
     if c.author_email != session.get("email"):
         return jsonify(code=403, msg="仅评论作者可编辑"), 403
     if c.status not in EDITABLE_STATUSES:
@@ -516,10 +519,13 @@ def edit_comment(cid: str):
 
 @bp.delete("/api/comments/<cid>")
 def delete_comment(cid: str):
-    """作者删除（仅待确认/已确认待修改态）：软删 DB + 入队 git rm。"""
+    """作者删除（仅待确认/已确认待修改态）：软删 DB + 入队 git rm。
+    项目关闭可评论时拒绝（同编辑：写 reviews/ 的操作全部拦截）。"""
     c = _get_live_comment(cid)
     if not c:
         return jsonify(code=404, msg="评论不存在"), 404
+    if not c.project.commentable:
+        return jsonify(code=400, msg="项目已关闭评论，无法删除"), 400
     if c.author_email != session.get("email"):
         return jsonify(code=403, msg="仅评论作者可删除"), 403
     if c.status not in EDITABLE_STATUSES:
@@ -555,6 +561,9 @@ def batch_status():
         c = _get_live_comment(str(cid))
         if not c:
             skipped.append({"comment_id": str(cid), "reason": "不存在"})
+            continue
+        if not c.project.commentable:
+            skipped.append({"comment_id": c.comment_id, "reason": "项目已关闭评论"})
             continue
         if c.status not in rule["from"]:
             skipped.append({"comment_id": c.comment_id, "reason": f"「{c.status}」状态不可{action}"})

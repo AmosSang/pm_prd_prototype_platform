@@ -784,11 +784,21 @@ test.describe('T4.5 项目级可评论开关', () => {
     await expect(page.getByTestId('comment-drawer')).toBeVisible()
     await expect(page.locator(`[data-cid="${d.comment_id}"]`)).toBeVisible()
 
-    // 重新开启 → 评论模式开关恢复可用
+    // T4.5 修订：写 reviews/ 的操作全部置灰/隐藏——
+    // 勾选评论后批量按钮仍 disabled；编辑/删除按钮不出现
+    await page.getByTestId(`ck-${d.comment_id}`).check()
+    await expect(page.getByTestId('batch-confirm')).toBeDisabled()
+    await expect(page.getByTestId('batch-ignore')).toBeDisabled()
+    await expect(page.getByTestId('edit-comment')).toHaveCount(0)
+    await expect(page.getByTestId('del-comment')).toHaveCount(0)
+
+    // 重新开启 → 评论模式开关恢复可用 + 编辑按钮回归
     await page.getByTestId('commentable-toggle').click()
     await expect(page.getByTestId('comment-mode')).not.toHaveClass(/is-disabled/, {
       timeout: 5_000,
     })
     await expect(page.getByTestId('commentable-toggle')).toHaveClass(/is-checked/)
+    await expect(page.getByTestId('edit-comment')).toHaveCount(1)
+    await expect(page.getByTestId('batch-confirm')).not.toBeDisabled()
   })
 })

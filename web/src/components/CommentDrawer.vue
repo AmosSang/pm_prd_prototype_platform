@@ -21,12 +21,15 @@ import {
  * - 每条评论「定位」按钮（T4.4 修订）：emit locate → Viewer 定位文档段落/
  *   原型元素（跨页/跨文档切换 + 高亮闪烁）
  * - focusKey（文档角标点击传入）：展开对应合并组 + 滚动 + 高亮 2s
+ * - T4.5：项目关闭可评论时批量按钮置灰、编辑/删除按钮隐藏（后端同步拦截，
+ *   这些操作都写 reviews/，属开关要消除的双写窗口；查看不受影响）
  */
 const props = defineProps<{
   projectId: number
   comments: CommentItem[]
   currentUserEmail: string
   focusKey?: string
+  commentable?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -136,8 +139,10 @@ const checkedList = computed(() =>
   props.comments.filter((c) => checked.value.has(c.comment_id)),
 )
 
-/** 可被当前动作处理的勾选项（状态机合法的才提交，其余后端也会跳过） */
+/** 可被当前动作处理的勾选项（状态机合法 + 项目可评论才可提交，
+ * 其余后端也会跳过） */
 function actionable(action: 'confirm' | 'ignore'): CommentItem[] {
+  if (props.commentable === false) return []
   const from = action === 'confirm' ? ['待确认'] : ['待确认', '已确认待修改']
   return checkedList.value.filter((c) => from.includes(c.status))
 }
@@ -218,7 +223,11 @@ async function onDelete(c: CommentItem) {
 }
 
 function canEdit(c: CommentItem): boolean {
-  return c.author_email === props.currentUserEmail && EDITABLE.includes(c.status)
+  return (
+    props.commentable !== false &&
+    c.author_email === props.currentUserEmail &&
+    EDITABLE.includes(c.status)
+  )
 }
 
 function statusTagType(s: CommentStatus): 'info' | 'warning' | 'success' | 'danger' {

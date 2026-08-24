@@ -625,3 +625,46 @@ class TestDeleteComment:
 
         assert client.delete(f"/api/comments/{c2}").status_code == 200
         assert client.delete(f"/api/comments/{c2}").status_code == 404
+
+
+class TestCommentableGuard:
+    """T4.5 修订：关闭可评论后，一切写 reviews/ 的操作全部拦截
+    （创建 T4.2 已拦；本次补批量状态/编辑/删除——开关的目的是消除
+    双写窗口，这些操作都会产生 commit）。查看不受影响。"""
+
+    def test_all_write_ops_blocked_when_off(self, app, project):
+        client, p = project
+        c1 = _submit_simple(client, p)
+        _wait_ok()
+
+        p.commentable = False
+        p.save()
+
+        # 批量确认：跳过并报告「项目已关闭评论」
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1], "action": "confirm",
+        })
+        data = resp.get_json()["data"]
+        assert data["updated"] == []
+        assert data["skipped"][0]["reason"] == "项目已关闭评论"
+        assert Comment.get(Comment.comment_id == c1).status == "待确认"
+
+        # 编辑：400
+        resp = client.patch(f"/api/comments/{c1}", json={"content": "改不动"})
+        assert resp.status_code == 400
+        assert "已关闭评论" in resp.get_json()["msg"]
+
+        # 删除：400
+        resp = client.delete(f"/api/comments/{c1}")
+        assert resp.status_code == 400
+        assert "已关闭评论" in resp.get_json()["msg"]
+        assert Comment.get(Comment.comment_id == c1).deleted is False
+
+        # 查看不受影响
+        items = client.get(f"/api/projects/{p.id}/comments").get_json()["data"]
+        assert [i["comment_id"] for i in items] == [c1]
+
+        # 重新开启后恢复可操作
+        p.commentable = True
+        p.save()
+        assert client.patch(f"/api/comments/{c1}", json={"content": "恢复了"}).status_code == 200

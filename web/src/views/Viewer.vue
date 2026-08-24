@@ -919,6 +919,7 @@ onBeforeUnmount(() => {
       :comments="comments"
       :current-user-email="currentUser?.email || ''"
       :focus-key="drawerFocusKey"
+      :commentable="commentable"
       @refresh="refreshComments"
       @locate="locateComment"
     />
