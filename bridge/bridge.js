@@ -280,7 +280,19 @@
     iconState = 'fading'
     clearTimeout(fadeTimer)
     fadeTimer = setTimeout(function () {
-      if (iconState === 'fading') hideIcon()
+      if (iconState !== 'fading') return
+      // 到期时鼠标若仍真悬停在 icon 上（渐隐中移入但 mouseover 事件被
+      // 合并/吞掉的边缘态），不隐藏——用 :hover 匹配判定（elementFromPoint
+      // 不可用：它只看坐标顶层元素，与鼠标实际位置无关，会误判常驻）
+      var hovered = false
+      try {
+        hovered = anchorIcon.matches(':hover')
+      } catch (e) { /* 旧浏览器兜底：忽略 */ }
+      if (hovered) {
+        cancelFade() // 鼠标真在 icon 上：恢复常显（相当于接住）
+        return
+      }
+      hideIcon()
     }, FADE_MS)
     anchorIcon.classList.add('pp-anchor-icon--fading')
   }

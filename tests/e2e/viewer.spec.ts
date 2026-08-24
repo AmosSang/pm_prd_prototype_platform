@@ -53,8 +53,20 @@ test.describe('T2.4 分屏查看器', () => {
   })
 
   test('打开分屏：iframe 就绪 + PRD 标题渲染', async ({ page }) => {
-    await page.getByTestId('open-project').first().click()
-    await expect(page).toHaveURL(/\/project\//)
+    // 按 slug 精确定位（并发 worker 下同名卡片多张；列表 id 倒序最新在前，
+    // 读首卡 slug 再按 slug 点——即便是别的 worker 刚绑的同仓库项目也无妨，
+    // 内容相同，断言照样成立）
+    const mySlug = (await page
+      .locator('.card', { hasText: '分屏E2E项目' })
+      .first()
+      .locator('.meta')
+      .textContent())!.split(' ')[0]
+    await page
+      .locator('.card', { hasText: '分屏E2E项目' })
+      .filter({ hasText: mySlug })
+      .getByTestId('open-project')
+      .click()
+    await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
 
     // 左：iframe 加载且 bridge READY 上报（.ready[data-ready=true]）
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
@@ -68,7 +80,16 @@ test.describe('T2.4 分屏查看器', () => {
   })
 
   test('分割条拖动：左侧宽度变化', async ({ page }) => {
-    await page.getByTestId('open-project').first().click()
+    const mySlug = (await page
+      .locator('.card', { hasText: '分屏E2E项目' })
+      .first()
+      .locator('.meta')
+      .textContent())!.split(' ')[0]
+    await page
+      .locator('.card', { hasText: '分屏E2E项目' })
+      .filter({ hasText: mySlug })
+      .getByTestId('open-project')
+      .click()
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
 
     const container = page.locator('.v-body')

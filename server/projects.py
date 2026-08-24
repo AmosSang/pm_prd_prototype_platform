@@ -5,6 +5,7 @@
 - GET  /api/projects → 列表（绝不含 token/encrypted_token）（T2.3）
 - GET  /api/projects/<pid>/overview → 文档列表 + 入口原型页（T2.4）
 - GET  /api/projects/<pid>/prd?file=xx.md → markdown 原文（T2.4）
+- GET  /api/projects/<pid>/reconcile → 锚点对账明细（T3.3）
 
 project_id：随机短 slug（kebab-case），与数字主键分离——
 本地 clone 目录、/proto/ 路径前缀都用它，路径不可猜测遍历（方案 §4 鉴权说明）。
@@ -20,6 +21,7 @@ from server.crypto_util import encrypt_token
 from server.gitops import CloneError, clone_project, pull_project, repo_path
 from server.models import Project, utcnow_str
 from server.page_map import parse_repo_page_map, scan_proto_anchors
+from server.reconcile import reconcile_repo
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
@@ -200,6 +202,7 @@ def overview(pid: int):
         return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
 
     docs = _list_md_files(root)
+    proto_files = _list_all_proto_html(root)
 
     def _read_doc(rel: str) -> str:
         full = os.path.realpath(os.path.join(root, *rel.split("/")))
@@ -207,19 +210,44 @@ def overview(pid: int):
             return f.read()
 
     # 反向联动锚点索引：原型 HTML 中的 data-pa → 文件（组件锚点查文件用）
-    proto_index = scan_proto_anchors(_list_all_proto_html(root), _read_doc)
+    proto_index = scan_proto_anchors(proto_files, _read_doc)
+    # T3.2：页面地图（PRD 第 4 章表格）→ 反向联动查目标原型文件
+    page_map = parse_repo_page_map(docs, _read_doc)
+    # T3.3：对账（两侧静态解析 + 三态比对），overview 带摘要（明细走 /reconcile）
+    recon = reconcile_repo(docs, proto_files, page_map, _read_doc)
 
     return jsonify(code=0, data={
         "project": _project_public(p),
         "docs": docs,
         "proto_entries": _list_proto_entries(root),
-        # T3.2：页面地图（PRD 第 4 章表格）→ 反向联动查目标原型文件
-        "page_map": parse_repo_page_map(docs, _read_doc),
-        # T3.2：锚点 → 原型文件索引（页面地图只登记页面锚点，组件锚点靠本索引）
+        "page_map": page_map,
         "proto_anchor_index": proto_index,
-        # T3.3 起填充：对账摘要
-        "reconcile_summary": None,
+        "reconcile_summary": recon["summary"],
     }), 200
+
+
+@bp.get("/<int:pid>/reconcile")
+def reconcile_detail(pid: int):
+    """对账明细（T3.3）：三态清单 + 重复 ID + 页面地图坏引用。"""
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    root = _repo_root(p)
+    if not os.path.isdir(root):
+        return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
+
+    def _read_doc(rel: str) -> str:
+        full = os.path.realpath(os.path.join(root, *rel.split("/")))
+        with open(full, encoding="utf-8") as f:
+            return f.read()
+
+    recon = reconcile_repo(
+        _list_md_files(root),
+        _list_all_proto_html(root),
+        parse_repo_page_map(_list_md_files(root), _read_doc),
+        _read_doc,
+    )
+    return jsonify(code=0, data=recon), 200
 
 
 @bp.get("/<int:pid>/prd")

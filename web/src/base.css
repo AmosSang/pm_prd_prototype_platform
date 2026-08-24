@@ -1,0 +1,10 @@
+/* 全局基础样式。
+ * body margin 归零：viewer 布局为 app-bar(44px) + .viewer(100vh-44px)，
+ * 若保留浏览器默认 body margin 8px×2，页面会多出 16px 可滚动空隙——
+ * 宿主页可滚会连带影响 iframe 视口位置稳定性（T3.1 渐隐用例排障结论：
+ * 滚动 8px 后回滚使 iframe 平移 16px，绝对坐标点击落空），且用户
+ * 也可能意外滚出缝隙，归零是一劳永逸的修复。
+ */
+body {
+  margin: 0;
+}

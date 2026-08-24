@@ -20,6 +20,40 @@ export interface PageMapEntry {
   anchor: string
 }
 
+/** 对账摘要（T3.3）：overview.reconcile_summary */
+export interface ReconcileSummary {
+  matched: number
+  missing_in_proto: number
+  undescribed: number
+  duplicate_prd: number
+  duplicate_proto: number
+  map_broken: number
+}
+
+/** 对账明细条目（T3.3）：/reconcile 接口 */
+export interface PrdAnchorRef {
+  id: string
+  file: string
+  doc_path: string
+  line: number
+}
+
+export interface ProtoAnchorRef {
+  id: string
+  file: string
+  css_path: string
+}
+
+export interface ReconcileDetail {
+  summary: ReconcileSummary
+  matched: { id: string; prd: PrdAnchorRef; proto: ProtoAnchorRef }[]
+  missing_in_proto: { id: string; prd: PrdAnchorRef }[]
+  undescribed: { id: string; proto: ProtoAnchorRef }[]
+  duplicate_prd: { id: string; occurrences: PrdAnchorRef[] }[]
+  duplicate_proto: { id: string; occurrences: ProtoAnchorRef[] }[]
+  map_broken: PageMapEntry[]
+}
+
 export interface ProjectOverview {
   project: ProjectInfo
   docs: string[]
@@ -27,7 +61,7 @@ export interface ProjectOverview {
   page_map: PageMapEntry[]
   /** 锚点 ID → 原型文件（T3.2）：组件锚点不在页面地图里，靠本索引找文件 */
   proto_anchor_index: Record<string, string>
-  reconcile_summary: unknown | null
+  reconcile_summary: ReconcileSummary | null
 }
 
 export function listProjects(): Promise<ProjectInfo[]> {
@@ -51,6 +85,11 @@ export function getPrd(id: number, file: string): Promise<{ file: string; conten
   return api.get<{ file: string; content: string }>(
     `/api/projects/${id}/prd?file=${encodeURIComponent(file)}`,
   )
+}
+
+/** 对账明细（T3.3）：三态清单 + 重复 ID + 页面地图坏引用 */
+export function getReconcile(id: number): Promise<ReconcileDetail> {
+  return api.get<ReconcileDetail>(`/api/projects/${id}/reconcile`)
 }
 
 /** 手动同步（临时按钮，T3.1）：fetch + ff-only 拉最新。T5.1 会升级为完整 SYNC_PULL。 */

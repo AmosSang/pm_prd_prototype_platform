@@ -110,8 +110,18 @@ test.describe('T3.2 反向联动', () => {
     await page.getByTestId('form-submit').click()
     await expect(page.getByText('绑定成功')).toBeVisible({ timeout: 30_000 })
 
-    await page.getByTestId('open-project').first().click()
-    await expect(page).toHaveURL(/\/project\//)
+    // 按 slug 精确定位（并发 worker 下同名卡片多张；列表 id 倒序最新在前）
+    const mySlug = (await page
+      .locator('.card', { hasText: '反向联动E2E' })
+      .first()
+      .locator('.meta')
+      .textContent())!.split(' ')[0]
+    await page
+      .locator('.card', { hasText: '反向联动E2E' })
+      .filter({ hasText: mySlug })
+      .getByTestId('open-project')
+      .click()
+    await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
     // 右侧 PRD 渲染完成（5.1 是 h3：### 5.1 登录页）
     await expect(
