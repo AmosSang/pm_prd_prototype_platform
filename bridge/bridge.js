@@ -193,9 +193,23 @@
 
   // ─── 锚点 hover icon（◈）──────────────────────────────────
   // 单例浮动 icon：pointer-events:auto，fixed 定位在目标元素左上角外侧；
-  // hover 到 [data-pa] 元素显示，移出/滚动时隐藏。点击 → ANCHOR_CLICK。
+  // hover 到 [data-pa] 元素显示；点击 → ANCHOR_CLICK。
+  // 隐藏策略：离开目标后 1s 渐隐（宽限期内 hover 到 icon 恢复常显）。
+  //
+  // 渐隐宽限期（用户反馈「鼠标挪到 icon 附近 icon 就消失」）：
+  // 鼠标离开锚点区域后 icon 不立即消失，而是 1s 内 opacity 1→0 渐隐；
+  // 这 1s 内鼠标 hover 到 icon 上 → 恢复不透明并常驻（icon 是 pointer
+  // 目标，必须可接住）；之后只有鼠标同时离开 icon 和锚点区域才重新渐隐。
+  // 嵌套锚点跳变修复：原型中组件锚点常在页面锚点内部（如按钮在
+  // [data-pa=page-timer] main 里），离开组件走到祖先锚点的空白区域时
+  // mouseover 会打到祖先锚点 → icon 若换目标会瞬移闪跳。规定：祖先
+  // 地盘不换目标，等价「离开目标」→ 进入渐隐宽限期（icon 原地渐隐仍
+  // 可接住）；后代锚点（更具体）才正常切换目标。
   var anchorIcon = null
   var iconTarget = null // 当前 icon 挂靠的元素
+  var iconState = 'hidden' // hidden | showing | fading（fading = 渐隐宽限期中）
+  var fadeTimer = null
+  var FADE_MS = 1000
 
   function ensureIcon() {
     if (anchorIcon) return anchorIcon
@@ -205,6 +219,7 @@
       'display:none;align-items:center;justify-content:center;width:22px;height:22px;' +
       'border-radius:6px;background:#2b5cff;color:#fff;font-size:13px;line-height:1;' +
       'font-family:system-ui,sans-serif;user-select:none;box-shadow:0 1px 6px rgba(0,0,0,.25);}' +
+      '.pp-anchor-icon--fading{opacity:0;transition:opacity 1s linear;}' +
       '.pp-anchor-icon:hover{background:#1e4fd8;}'
     document.head.appendChild(style)
 
@@ -253,37 +268,102 @@
     icon.style.top = Math.round(y) + 'px'
   }
 
+  /** 开始 1s 渐隐宽限期。期间 hover 到 icon 上可恢复（取消 fading class）。 */
+  function startFade() {
+    if (!anchorIcon || !iconTarget) return
+    if (iconState === 'fading') return
+    iconState = 'fading'
+    clearTimeout(fadeTimer)
+    fadeTimer = setTimeout(function () {
+      if (iconState === 'fading') hideIcon()
+    }, FADE_MS)
+    anchorIcon.classList.add('pp-anchor-icon--fading')
+  }
+
+  /** 取消渐隐，恢复不透明常显（无淡入动画——接住要立刻实心）。 */
+  function cancelFade() {
+    clearTimeout(fadeTimer)
+    if (anchorIcon) anchorIcon.classList.remove('pp-anchor-icon--fading')
+    if (iconState === 'fading') iconState = iconTarget ? 'showing' : 'hidden'
+  }
+
   function showIconFor(el) {
     iconTarget = el
     positionIcon(el)
+    cancelFade() // 新目标：无渐隐 class，实心显示
     anchorIcon.style.display = 'flex'
+    iconState = 'showing'
   }
 
   function hideIcon() {
+    clearTimeout(fadeTimer)
     iconTarget = null
-    if (anchorIcon) anchorIcon.style.display = 'none'
+    iconState = 'hidden'
+    if (anchorIcon) {
+      anchorIcon.style.display = 'none'
+      anchorIcon.classList.remove('pp-anchor-icon--fading') // 复位
+    }
   }
 
-  // 事件委托：mouseover/mouseout 打靶（只关心 [data-pa]，冒泡路径上最近一个）
+  /** el 是否 iconTarget 的祖先（含自身）。用于识别「走到祖先锚点地盘」。 */
+  function isAncestorOrSelf(el) {
+    for (var p = iconTarget; p && p.nodeType === 1; p = p.parentElement) {
+      if (p === el) return true
+    }
+    return false
+  }
+
+  // 事件委托：mouseover 单入口驱动状态机（mouseout 在 DOM 事件语义下
+  // 不可靠——捕获阶段 mouseover 在进入任何元素时必然触发，等价信息更全）
   document.addEventListener(
     'mouseover',
     function (e) {
-      // icon 自身：保持显示（icon 是浮层不是锚点元素，鼠标移上去不能把自己藏了）
-      if (e.target && e.target.classList && e.target.classList.contains('pp-anchor-icon')) return
+      // icon 自身：接住——取消渐隐恢复常显，不换目标
+      if (e.target && e.target.classList && e.target.classList.contains('pp-anchor-icon')) {
+        if (iconState === 'fading') cancelFade()
+        return
+      }
       var el = e.target && e.target.closest ? e.target.closest('[data-pa]') : null
-      if (el && el !== iconTarget) showIconFor(el)
-      else if (!el) hideIcon()
+      if (!iconTarget) {
+        // 无当前目标：hover 到锚点即显示
+        if (el) showIconFor(el)
+        return
+      }
+      if (el === iconTarget) {
+        // 回到目标：恢复常显
+        cancelFade()
+        return
+      }
+      // 有目标但 hover 到别处：
+      if (!el) {
+        // 非锚点区域：进入渐隐宽限期（1s 内可接住/可回）
+        startFade()
+        return
+      }
+      // hover 到了另一个锚点：
+      if (isAncestorOrSelf(el)) {
+        // 祖先锚点地盘（从按钮走到 main 空白区）：不换目标不闪跳，渐隐
+        startFade()
+        return
+      }
+      // 更具体的后代锚点（从 main 走到内部按钮）：切换目标
+      if (iconTarget.contains(el)) {
+        showIconFor(el)
+        return
+      }
+      // 无关的兄弟锚点：直接换目标
+      showIconFor(el)
     },
     true,
   )
+  // mouseout 只处理「移出 iframe 窗口」（relatedTarget 为 null）——此时
+  // 不再有后续 mouseover，icon 若常显会永久残留，立即渐隐。
   document.addEventListener(
     'mouseout',
     function (e) {
-      // 移出到 icon 自身不算离开（icon 是 body 子节点，会触发 body 的 mouseover）
-      var to = e.relatedTarget
-      if (to && to.closest && to.closest('[data-pa]')) return
-      if (to && to.classList && to.classList.contains('pp-anchor-icon')) return
-      hideIcon()
+      if (e.relatedTarget === null) {
+        startFade()
+      }
     },
     true,
   )

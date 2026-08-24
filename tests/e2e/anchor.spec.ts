@@ -136,6 +136,44 @@ test.describe('T3.1 锚点正向联动', () => {
     await expect(target).toBeInViewport({ timeout: 3_000 })
   })
 
+  test('渐隐宽限期：离开锚点后 icon 不立即消失，1s 内可接住并点击', async ({ page }) => {
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    const icon = protoFrame.locator('.pp-anchor-icon')
+
+    // hover 锚点 → icon 显示
+    await protoFrame.locator('[data-pa="page-login"]').hover()
+    await expect(icon).toBeVisible({ timeout: 5_000 })
+
+    // 鼠标移到非锚点空白处（section 间隙的 body 区域）→ 进入 1s 渐隐宽限期
+    // （icon 仍 display:flex，只是 opacity 过渡到 0——期间可接住）
+    await page.mouse.move(5, 300)
+    // 渐隐刚启动（<1s），icon 尚未隐藏：hover 到 icon 上应恢复常显
+    await icon.hover({ timeout: 2_000 })
+    // 接住后：fading class 被移除（恢复不透明、常驻）
+    await expect(icon).not.toHaveClass(/pp-anchor-icon--fading/)
+
+    // 接住状态下点击 → 正常发出 ANCHOR_CLICK，右侧高亮
+    await icon.click()
+    const target = page.getByTestId('prd-content').locator('h2[data-pa="page-login"]')
+    await expect(target).toHaveClass(/anchor-highlight/, { timeout: 3_000 })
+  })
+
+  test('渐隐宽限期：1s 内不接住则 icon 完整隐藏', async ({ page }) => {
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    const icon = protoFrame.locator('.pp-anchor-icon')
+
+    await protoFrame.locator('[data-pa="page-login"]').hover()
+    await expect(icon).toBeVisible({ timeout: 5_000 })
+
+    // 移到空白处且不回来——1s 宽限期过后 icon 隐藏（display:none）
+    await page.mouse.move(5, 300)
+    await expect(icon).toBeHidden({ timeout: 3_000 })
+
+    // 隐藏后再次 hover 锚点：正常重新显示（状态机可复活）
+    await protoFrame.locator('[data-pa="page-login"]').hover()
+    await expect(icon).toBeVisible({ timeout: 5_000 })
+  })
+
   test('锚点未命中当前文档 → toast 提示不报错', async ({ page }) => {
     const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
     // login-captcha 在 PRD li 注释里有——造一个 PRD 没有的锚点：直接 hover form
