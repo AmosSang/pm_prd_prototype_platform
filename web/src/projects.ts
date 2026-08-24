@@ -1,4 +1,4 @@
-/** 项目相关 API 与类型（T2.3）。 */
+/** 项目相关 API 与类型（T2.3 / T2.4）。 */
 import { api } from './api'
 
 export interface ProjectInfo {
@@ -13,6 +13,14 @@ export interface ProjectInfo {
   created_at: string
 }
 
+export interface ProjectOverview {
+  project: ProjectInfo
+  docs: string[]
+  proto_entries: string[]
+  page_map: unknown[]
+  reconcile_summary: unknown | null
+}
+
 export function listProjects(): Promise<ProjectInfo[]> {
   return api.get<ProjectInfo[]>('/api/projects')
 }
@@ -24,4 +32,14 @@ export function createProject(payload: {
   branch: string
 }): Promise<ProjectInfo> {
   return api.post<ProjectInfo>('/api/projects', payload)
+}
+
+export function getOverview(id: number): Promise<ProjectOverview> {
+  return api.get<ProjectOverview>(`/api/projects/${id}/overview`)
+}
+
+export function getPrd(id: number, file: string): Promise<{ file: string; content: string }> {
+  return api.get<{ file: string; content: string }>(
+    `/api/projects/${id}/prd?file=${encodeURIComponent(file)}`,
+  )
 }

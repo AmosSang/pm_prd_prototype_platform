@@ -102,6 +102,9 @@ onMounted(async () => {
         <p class="meta">{{ p.project_id }} · {{ p.branch }}</p>
         <p class="repo" :title="p.repo_url">{{ p.repo_url }}</p>
         <p v-if="p.sync_error" class="err">同步异常：{{ p.sync_error }}</p>
+        <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
+          打开分屏查看器 →
+        </router-link>
       </div>
 
       <p v-if="projects.length === 0" class="hint">
@@ -189,6 +192,7 @@ onMounted(async () => {
   white-space: nowrap;
 }
 .card .err { color: #d33; font-size: 12px; }
+.card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; margin-top: 8px; }
 .card.demo { border-style: dashed; }
 .card a { color: #3b82f6; text-decoration: none; margin-right: 12px; font-size: 13px; }
 .hint { color: #999; font-size: 13px; }

@@ -1,18 +1,23 @@
-"""projects 蓝图（T2.3）：项目绑定（clone）+ 列表。
+"""projects 蓝图（T2.3 / T2.4）：项目绑定、列表、查看器数据。
 
 接口（技术方案 §4）：
-- POST /api/projects {name, repo_url, token, branch} → 绑定仓库并 clone
-- GET  /api/projects → 列表（绝不含 token/encrypted_token）
+- POST /api/projects {name, repo_url, token, branch} → 绑定仓库并 clone（T2.3）
+- GET  /api/projects → 列表（绝不含 token/encrypted_token）（T2.3）
+- GET  /api/projects/<pid>/overview → 文档列表 + 入口原型页（T2.4）
+- GET  /api/projects/<pid>/prd?file=xx.md → markdown 原文（T2.4）
 
 project_id：随机短 slug（kebab-case），与数字主键分离——
 本地 clone 目录、/proto/ 路径前缀都用它，路径不可猜测遍历（方案 §4 鉴权说明）。
 """
+import os
+import re
 import secrets
 
 from flask import Blueprint, jsonify, request
 
+from server.config import DEMO_REPO_DIR
 from server.crypto_util import encrypt_token
-from server.gitops import CloneError, clone_project
+from server.gitops import CloneError, clone_project, repo_path
 from server.models import Project, utcnow_str
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
@@ -93,3 +98,96 @@ def git_status(pid: int):
     if not p:
         return _err("项目不存在", 404)
     return jsonify(code=0, data={"last_sync_at": p.last_sync_at, "sync_error": p.sync_error}), 200
+
+
+# ───────────────────────── T2.4 查看器数据 ─────────────────────────
+
+SAFE_FILE = re.compile(r"^[\w\-./\u4e00-\u9fff ]+$")
+
+
+def _repo_root(p: Project) -> str:
+    """项目仓库根目录：demo 走 fixture，其余走 /data/repos（与 proto_proxy 一致）。"""
+    if p.project_id == "demo":
+        return os.path.realpath(DEMO_REPO_DIR)
+    return os.path.realpath(repo_path(p.project_id))
+
+
+def _list_md_files(root: str) -> list[str]:
+    """列出仓库内 PRD 文档：prd/ 子树优先；无 prd/ 目录时兼容根目录 *.md。
+
+    返回相对仓库根的路径（正斜杠），排序稳定（prd/ 内优先）。
+    """
+    docs: list[str] = []
+    prd_dir = os.path.join(root, "prd")
+    if os.path.isdir(prd_dir):
+        for dirpath, _dirnames, filenames in os.walk(prd_dir):
+            for fn in sorted(filenames):
+                if fn.lower().endswith(".md"):
+                    rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                    docs.append(rel.replace(os.sep, "/"))
+        return docs
+    # 兼容：仓库根直接放 md（如用户真实仓库「灵雁 · 产品建设思路.md」）
+    for fn in sorted(os.listdir(root)):
+        fp = os.path.join(root, fn)
+        if os.path.isfile(fp) and fn.lower().endswith(".md"):
+            docs.append(fn)
+    return docs
+
+
+def _list_proto_entries(root: str) -> list[str]:
+    """列出原型入口候选（prototype/index.html 或 pages/*.html，代理路径形式）。"""
+    entries: list[str] = []
+    proto_dir = os.path.join(root, "prototype")
+    if not os.path.isdir(proto_dir):
+        return entries
+    idx = os.path.join(proto_dir, "index.html")
+    if os.path.isfile(idx):
+        entries.append("prototype/index.html")
+    pages_dir = os.path.join(proto_dir, "pages")
+    if os.path.isdir(pages_dir):
+        for fn in sorted(os.listdir(pages_dir)):
+            if fn.endswith(".html"):
+                entries.append(f"prototype/pages/{fn}")
+    return entries
+
+
+@bp.get("/<int:pid>/overview")
+def overview(pid: int):
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    root = _repo_root(p)
+    if not os.path.isdir(root):
+        return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
+    return jsonify(code=0, data={
+        "project": _project_public(p),
+        "docs": _list_md_files(root),
+        "proto_entries": _list_proto_entries(root),
+        # T3.x 起填充：页面地图 + 对账摘要
+        "page_map": [],
+        "reconcile_summary": None,
+    }), 200
+
+
+@bp.get("/<int:pid>/prd")
+def prd_file(pid: int):
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    file = str(request.args.get("file") or "").strip()
+    if not file or ".." in file.split("/") or file.startswith("/"):
+        return _err("非法文件路径", 400)
+
+    root = _repo_root(p)
+    full = os.path.realpath(os.path.join(root, *file.split("/")))
+    if not full.startswith(root + os.sep) or not os.path.isfile(full):
+        return _err("文件不存在", 404)
+    if not full.lower().endswith(".md"):
+        return _err("仅支持 markdown 文档", 400)
+
+    try:
+        with open(full, encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return _err(f"读取失败：{e}", 500)
+    return jsonify(code=0, data={"file": file, "content": content}), 200

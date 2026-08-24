@@ -21,6 +21,12 @@ const router = createRouter({
       name: 'shot-demo',
       component: () => import('../views/ShotDemo.vue'),
     },
+    {
+      // T2.4：分屏查看器（slug = project_id，DB 主键不进 URL 防猜测）
+      path: '/project/:slug',
+      name: 'viewer',
+      component: () => import('../views/Viewer.vue'),
+    },
   ],
 })
 

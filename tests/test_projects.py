@@ -196,3 +196,74 @@ class TestCrypto:
 
         assert mask_token("glpat-abcdef1234") == "****1234"
         assert mask_token("short") == "****"
+
+
+# ───────────────────────── T2.4 查看器 API ─────────────────────────
+
+class TestViewerAPI:
+    def test_overview_docs_and_entries(self, app, tmp_path):
+        """overview：prd/ 优先；无 prd/ 时兼容根目录 md；原型入口列出。"""
+        client, repos_dir = app
+        remote = make_bare_remote(tmp_path, "viewer")
+        resp = client.post("/api/projects", json={
+            "name": "查看器", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+
+        resp = client.get(f"/api/projects/{pid}/overview")
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["docs"] == ["prd/a.md"]
+        assert "prototype/index.html" in data["proto_entries"]
+
+    def test_overview_root_md_compat(self, app, tmp_path):
+        """仓库无 prd/ 目录（根目录直接放 md）也能列出文档。"""
+        client, repos_dir = app
+        # 手工构造一个「根目录放 md」的裸仓库
+        work = tmp_path / "flat-work"
+        bare = tmp_path / "flat.git"
+        work.mkdir()
+        subprocess.run(["git", "init", "-b", "main", "-q", str(work)], check=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t.local"], check=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+        (work / "灵雁思路.md").write_text("# 灵雁\n")
+        subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(work), "commit", "-qm", "init"], check=True)
+        subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True, capture_output=True)
+
+        resp = client.post("/api/projects", json={
+            "name": "扁平仓库", "repo_url": str(bare), "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+        resp = client.get(f"/api/projects/{pid}/overview")
+        assert resp.get_json()["data"]["docs"] == ["灵雁思路.md"]
+
+        # prd 接口能读根目录 md（中文文件名）
+        resp = client.get(f"/api/projects/{pid}/prd?file=灵雁思路.md")
+        assert resp.status_code == 200
+        assert "# 灵雁" in resp.get_json()["data"]["content"]
+
+    def test_prd_file_traversal_blocked(self, app, tmp_path):
+        """prd 接口防目录穿越（.. / 绝对路径 / 越界路径全拒绝）。"""
+        client, _ = app
+        remote = make_bare_remote(tmp_path, "trav")
+        resp = client.post("/api/projects", json={
+            "name": "穿越", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+
+        for bad in ["../platform.db", "/etc/passwd", "prd/../../server/app.py", ""]:
+            resp = client.get(f"/api/projects/{pid}/prd", query_string={"file": bad})
+            assert resp.status_code in (400, 404), f"{bad} 未被拦截"
+
+    def test_prd_normal_read(self, app, tmp_path):
+        client, _ = app
+        remote = make_bare_remote(tmp_path, "read")
+        resp = client.post("/api/projects", json={
+            "name": "读取", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+
+        resp = client.get(f"/api/projects/{pid}/prd?file=prd/a.md")
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["content"] == "# PRD\n"
