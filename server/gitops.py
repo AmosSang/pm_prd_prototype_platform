@@ -161,30 +161,61 @@ def commit_and_push(
     message: str,
     author_name: str,
     author_email: str,
-) -> str | None:
-    """评论落仓（T4.2 同步版）：add reviews/ → commit（作者=评论人）→ push。
+    paths: list[str] | None = None,
+    remove: bool = False,
+) -> tuple[str | None, int]:
+    """落仓提交（T4.3 队列 worker 的执行单元）。
 
-    返回 None = 成功；否则返回错误描述（调用方置 sync_error，不阻塞评论——
-    DB 与文件已落，git 状态可后续修复）。T4.3 将把本调用改造为串行队列
-    任务（COMMIT_COMMENT 等 + push 冲突 pull --rebase 重试），本函数为
-    队列 worker 的执行单元。
+    add/rm 指定路径（精确到评论自己的文件，git log 每条 commit 对应一条
+    评论，diff 清晰无夹带）→ commit（作者=操作人）→ push。
+
+    push 冲突重试（技术方案 §2.7）：push 失败（远端有新提交，典型为 skill
+    回写后平台不知情）→ pull --rebase → 再 push，最多 3 次 push；rebase
+    本身失败（冲突/网络）→ abort 留干净现场并置错误。
+
+    返回 (错误描述 | None, push 尝试次数)。remove=True 用 git rm
+    --ignore-unmatch（COMMIT_DELETE；文件不存在不算错）。
     """
     dest = repo_path(project_id)
     if not os.path.isdir(dest):
-        return f"本地 clone 不存在：{project_id}"
+        return f"本地 clone 不存在：{project_id}", 0
 
     env, script = _askpass_env(decrypt_token(encrypted_token))
     try:
         repo = GitRepo(dest)
-        # 只 add reviews/ 子树——评论与截图是平台唯一写入口，防止误提交
-        # 工作区其他未知变更（如残留调试文件）
-        repo.git.add("reviews", env=env)
+        if remove:
+            repo.git.rm("-f", "--ignore-unmatch", *(paths or []), env=env)
+        else:
+            # 只 add 指定路径——评论与截图是平台在仓库的唯一写入口，
+            # 精确路径防止误提交工作区其他未知变更（如残留调试文件）
+            repo.git.add(*(paths or ["reviews"]), env=env)
         actor = Actor(author_name, author_email)
         repo.index.commit(message, author=actor, committer=actor)
-        repo.git.push("origin", branch, env=env)
-        return None
+
+        attempts = 0
+        while attempts < 3:
+            attempts += 1
+            try:
+                repo.git.push("origin", branch, env=env)
+                return None, attempts
+            except GitCommandError as push_err:
+                if attempts >= 3:
+                    raw = ((push_err.stderr or "") + " " + (push_err.stdout or "")).strip()
+                    return f"push 重试 3 次仍失败：{raw[:300]}", attempts
+                # 远端有新提交 → rebase 到远端最新后重试
+                try:
+                    repo.git.pull("--rebase", "origin", branch, env=env)
+                except GitCommandError:
+                    # rebase 冲突/网络失败：中止 rebase 留干净现场（下次
+                    # 手动同步可恢复），不再重试（同样结果）
+                    try:
+                        repo.git.rebase("--abort")
+                    except GitCommandError:
+                        pass
+                    return "push 冲突且 pull --rebase 失败：请在仓库手动处理后重新同步", attempts
+        return "push 重试次数用尽", attempts
     except GitCommandError as e:
         raw = ((e.stderr or "") + " " + (e.stdout or "")).strip()
-        return f"评论落仓失败：{raw[:300]}"
+        return f"落仓失败：{raw[:300]}", 0
     finally:
         _cleanup_askpass(script)

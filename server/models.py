@@ -4,6 +4,7 @@
 - T2.1: users / verification_codes
 - T2.3: projects
 - T4.2: comments（评论展示缓存，事实源为仓库 reviews/）
+- T4.3: git_tasks（落仓任务状态，队列本体在内存 server/git_tasks.py）
 """
 import datetime as dt
 
@@ -100,7 +101,26 @@ class Comment(BaseModel):
     updated_at = peewee.CharField(default=utcnow_str)
 
 
+class GitTask(BaseModel):
+    """落仓任务状态（T4.3，技术方案 §3）。
+
+    队列本体在内存（每项目 queue.Queue + 单 worker 线程，server/git_tasks.py）；
+    本表持久化任务状态（pending/done/error）供排查与界面提示（项目卡片
+    sync_error 由 worker 维护）。注意：进程重启时未完成的 pending 任务不
+    自动恢复（一期不做；评论以仓库为事实源，T5.1 SYNC_PULL 比对可补差异）。
+    """
+    id = peewee.AutoField(primary_key=True)
+    project = peewee.ForeignKeyField(Project, backref="git_tasks", null=False)
+    task_type = peewee.CharField(null=False)   # COMMIT_COMMENT/COMMIT_STATUS/COMMIT_DELETE
+    ref_id = peewee.CharField(null=True)       # 关联 comment_id
+    status = peewee.CharField(null=False)      # pending/done/error
+    retry_count = peewee.IntegerField(default=0)  # push 尝试次数（含首次）
+    error = peewee.CharField(null=True)
+    created_at = peewee.CharField(default=utcnow_str)
+    updated_at = peewee.CharField(default=utcnow_str)
+
+
 def init_tables() -> None:
     """建表（幂等）。应用启动与测试 fixture 共用。"""
     db.connect(reuse_if_open=True)
-    db.create_tables([User, VerificationCode, Project, Comment], safe=True)
+    db.create_tables([User, VerificationCode, Project, Comment, GitTask], safe=True)

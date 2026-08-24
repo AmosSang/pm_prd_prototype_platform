@@ -133,7 +133,8 @@ def test_non_dict_rejected():
 # ═══════════════════════ T4.2 提交链路（POST /comments）═══════════════════════
 
 from server.app import create_app  # noqa: E402
-from server.models import Comment, Project, db  # noqa: E402
+from server.git_tasks import wait_tasks  # noqa: E402
+from server.models import Comment, GitTask, Project, db  # noqa: E402
 
 
 def make_anchor_remote(tmp_path, name: str = "cm") -> str:
@@ -226,7 +227,7 @@ def _submit(client, p, payload, **over):
 
 class TestCreateComment:
     def test_dom_comment_full_chain(self, app, project, tmp_path):
-        """DOM 评论全链路：DB + reviews/ 文件 + git commit/push + doc 锚点匹配。"""
+        """DOM 评论全链路：DB + reviews/ 文件 + git commit/push（队列）+ doc 锚点匹配。"""
         client, p = project
         _, repos_dir = app
 
@@ -237,7 +238,9 @@ class TestCreateComment:
         assert cid.startswith("c-")
         assert data["status"] == "待确认"
         assert data["author"] == "产品桑"
-        assert data["git_pushed"] is True
+        # T4.3：git 走异步队列——请求返回时 pending，等队列跑完再断言 git 结果
+        assert data["git_task"]["status"] == "pending"
+        assert wait_tasks(timeout=20)
 
         # DB 落库（展示缓存）
         row = Comment.get(Comment.comment_id == cid)
@@ -277,6 +280,9 @@ class TestCreateComment:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert remote_msg == f"comment: {cid} 创建"
+        # 任务终态 done
+        task = GitTask.get(GitTask.ref_id == cid)
+        assert task.status == "done" and task.error is None
 
     def test_dom_comment_without_anchor_no_doc_link(self, app, project):
         """非锚点区域（候选锚点查 PRD 未命中）→ 标记「无 PRD 锚点关联」。"""
@@ -404,7 +410,7 @@ class TestCreateComment:
         assert Comment.select().count() == 0
 
     def test_push_failure_not_blocking(self, app, project):
-        """push 失败不阻塞评论：DB/文件已落，sync_error 记录，git_pushed=False。"""
+        """push 失败不阻塞评论：DB/文件已落，任务 error + sync_error（队列语义）。"""
         client, p = project
         _, repos_dir = app
         # 远端不可达：改本地 clone 的 origin URL（push 走 .git/config 而非 DB repo_url）
@@ -414,13 +420,16 @@ class TestCreateComment:
             check=True, capture_output=True,
         )
         resp = _submit(client, p, _dom_payload())
-        assert resp.status_code == 200, resp.get_json()
-        data = resp.get_json()["data"]
-        assert data["git_pushed"] is False
-        assert data["git_error"]
-        # 评论本体已完整落库落文件
-        assert Comment.get(Comment.comment_id == data["comment_id"])
-        assert (root / "reviews" / "comments" / f"{data['comment_id']}.json").is_file()
+        assert resp.status_code == 200, resp.get_json()  # 提交不被 git 阻塞
+        cid = resp.get_json()["data"]["comment_id"]
+        assert wait_tasks(timeout=20)
+
+        task = GitTask.get(GitTask.ref_id == cid)
+        assert task.status == "error"
+        assert task.retry_count >= 1
+        # 评论本体已完整落库落文件（本地 commit 也已做，仅 push 失败）
+        assert Comment.get(Comment.comment_id == cid)
+        assert (root / "reviews" / "comments" / f"{cid}.json").is_file()
         # sync_error 落库（首页红点提示用）
         p2 = Project.get_by_id(p.id)
         assert p2.sync_error

@@ -130,7 +130,7 @@ export interface HighlightRect {
   h: number
 }
 
-/** 评论提交结果（POST /comments 响应：评论 JSON 全量 + git 状态） */
+/** 评论提交结果（POST /comments 响应：评论 JSON 全量 + 落仓任务状态） */
 export interface CreateCommentResult {
   comment_id: string
   author: string
@@ -146,8 +146,8 @@ export interface CreateCommentResult {
   highlight_rect?: HighlightRect
   doc_anchor_id?: string
   doc_excerpt?: string
-  git_pushed: boolean
-  git_error: string | null
+  /** T4.3 落仓任务（异步队列：请求返回时 pending，git 结果不阻塞提交） */
+  git_task: { id: number; status: string }
 }
 
 export function createComment(

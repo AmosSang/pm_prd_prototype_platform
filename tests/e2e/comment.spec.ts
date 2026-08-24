@@ -346,6 +346,23 @@ async function submitAndWait(page: Page, content: string): Promise<Record<string
   return body.data
 }
 
+/** T4.3：git 落仓走异步队列——轮询 git log 直到目标 commit 出现。
+ * 本地 commit 与远端 push 是同一任务的串行步骤，本地出现后远端随即跟上，
+ * 两处都轮询（本地出 + 远端出 = push 生效）。 */
+async function waitForGitLog(repoDir: string, message: string, timeout = 15_000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    try {
+      const log = execSync(`git -C "${repoDir}" log --format=%s`).toString()
+      if (log.includes(message)) return
+    } catch {
+      /* 读取竞态（worker 操作中）——重试 */
+    }
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  throw new Error(`git log 未出现「${message}」（${repoDir}）`)
+}
+
 test.describe('T4.2 评论提交链路', () => {
   test('DOM 评论全链路：截图 + 成功态 + reviews/ 文件 + git commit/push', async ({ page }) => {
     const protoFrame = await openViewer(page)
@@ -358,9 +375,9 @@ test.describe('T4.2 评论提交链路', () => {
     const data = await submitAndWait(page, '验证码发送后按钮要进入 60s 倒计时禁用态')
     const cid: string = data.comment_id
     expect(cid).toMatch(/^c-\d{8}-\d{3}$/)
-    expect(data.git_pushed).toBe(true)
     expect(data.status).toBe('待确认')
     expect(data.author).toBe('E2E测试员')
+    expect(data.git_task.status).toBe('pending') // T4.3：入队即返回
 
     // 成功态：comment_id 回显 + 截图预览（提交时自动生成，可查看不可编辑）
     await expect(page.getByTestId('submitted-cid')).toHaveText(cid)
@@ -390,11 +407,12 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.highlight_rect).toBeTruthy()
     expect(fj.highlight_rect.w).toBeGreaterThan(0)
 
-    // git：本地 clone 与远端裸仓库（push 生效）最新 commit
+    // git：本地 clone 与远端裸仓库（push 生效）最新 commit——队列异步，
+    // 轮询等待（任务卡验收：提交评论后 git log 出现对应 commit）
+    await waitForGitLog(clone, `comment: ${cid} 创建`)
+    await waitForGitLog(REPO_DIR, `comment: ${cid} 创建`)
     const msg = execSync(`git -C "${clone}" log -1 --format=%s`).toString().trim()
     expect(msg).toBe(`comment: ${cid} 创建`)
-    const remoteMsg = execSync(`git -C "${REPO_DIR}" log -1 --format=%s`).toString().trim()
-    expect(remoteMsg).toBe(`comment: ${cid} 创建`)
 
     // 完成按钮关闭评论框
     await page.getByTestId('comment-done').click()
@@ -413,8 +431,8 @@ test.describe('T4.2 评论提交链路', () => {
 
     const data = await submitAndWait(page, '本页首屏加载偏慢，需要骨架屏')
     const cid: string = data.comment_id
-    expect(data.git_pushed).toBe(true)
 
+    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
     const fj = JSON.parse(
       fs.readFileSync(
         path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
@@ -448,8 +466,8 @@ test.describe('T4.2 评论提交链路', () => {
 
     const data = await submitAndWait(page, '账号输入需要补充支持邮箱登录的说明')
     const cid: string = data.comment_id
-    expect(data.git_pushed).toBe(true)
 
+    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
     const fj = JSON.parse(
       fs.readFileSync(
         path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
@@ -488,8 +506,8 @@ test.describe('T4.2 评论提交链路', () => {
 
     const data = await submitAndWait(page, '这段的通用说明需要补充适用范围')
     const cid: string = data.comment_id
-    expect(data.git_pushed).toBe(true)
 
+    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
     const fj = JSON.parse(
       fs.readFileSync(
         path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),

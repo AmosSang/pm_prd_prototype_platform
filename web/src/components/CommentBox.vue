@@ -64,8 +64,8 @@ function onSubmit() {
         <div class="cb-done-head">
           <span class="ok">✓ 已提交</span>
           <code class="cid" data-testid="submitted-cid">{{ result.comment_id }}</code>
-          <span v-if="!result.git_pushed" class="push-fail" title="评论已保存到平台，稍后会重试同步">
-            仓库同步失败
+          <span class="syncing" title="git 提交由后台队列执行；失败时项目卡片会显示同步异常">
+            仓库同步中
           </span>
           <button class="cb-btn" data-testid="comment-done" @click="emit('close')">完成</button>
         </div>
@@ -284,11 +284,12 @@ b { font-weight: 500; color: #24292f; word-break: break-all; }
   padding: 1px 6px;
   color: #2b5cff;
 }
-.cb-done-head .push-fail {
-  color: #b45200;
-  background: #fdf6ec;
+.cb-done-head .syncing {
+  color: #57606a;
+  background: #f6f8fa;
   border-radius: 4px;
   padding: 1px 6px;
+  font-size: 11px;
 }
 .cb-done-head .cb-btn { margin-left: auto; }
 .cb-shot {

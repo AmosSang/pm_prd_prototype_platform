@@ -197,10 +197,9 @@ async function submitComment(form: { content: string; priority: string; scope: s
       shot_id: shotId || undefined,
       highlight_rect: rect || undefined,
     })
+    // T4.3：git 落仓走异步队列（git_task pending），提交不再被 git 结果
+    // 阻塞；失败会置项目 sync_error（首页卡片「同步异常」提示）
     submittedResult.value = res
-    if (!res.git_pushed) {
-      ElMessage.warning('评论已保存，但同步到仓库失败——请稍后在首页点「同步」重试')
-    }
   } catch (e) {
     submitError.value = e instanceof Error ? e.message : '提交失败，请重试'
     if (!isDoc && commentMode.value) postSetCommentMode(true)

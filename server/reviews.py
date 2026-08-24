@@ -28,7 +28,7 @@ import shutil
 
 from flask import Blueprint, jsonify, request, session
 
-from server.gitops import commit_and_push
+from server.git_tasks import enqueue_comment
 from server.models import Comment, Project, utcnow_str
 from server.projects import _list_md_files, _repo_root
 from server.reconcile import extract_prd_anchors
@@ -356,7 +356,9 @@ def create_comment(pid: int):
         updated_at=utcnow_str(),
     )
 
-    # 落仓：截图搬移（临时区保留供预览）+ 评论 JSON + commit/push
+    # 落仓（T4.3 队列）：文件先写（新文件 untracked，与 worker 的 git 操作
+    # 无竞态），git add/commit/push 入队由每项目串行 worker 执行——请求即
+    # 返回不等待 git，push 冲突自动 rebase 重试，失败置 sync_error 不阻塞
     if shot_src:
         shots_dir = os.path.join(root, "reviews", "shots")
         os.makedirs(shots_dir, exist_ok=True)
@@ -366,16 +368,12 @@ def create_comment(pid: int):
     with open(os.path.join(comments_dir, f"{cid}.json"), "w", encoding="utf-8") as f:
         json.dump(cj, f, ensure_ascii=False, indent=2)
 
-    git_error = commit_and_push(
-        p.project_id,
-        p.encrypted_token,
-        p.branch,
-        f"comment: {cid} 创建",
-        session["name"],
-        session["email"],
+    task = enqueue_comment(
+        p, cid, has_shot=bool(shot_src),
+        author_name=session["name"], author_email=session["email"],
     )
-    if git_error:
-        p.sync_error = git_error
-        p.save()
 
-    return jsonify(code=0, data={**cj, "git_pushed": git_error is None, "git_error": git_error}), 200
+    return jsonify(
+        code=0,
+        data={**cj, "git_task": {"id": task.id, "status": task.status}},
+    ), 200
