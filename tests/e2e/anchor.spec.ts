@@ -96,6 +96,12 @@ test.describe('T3.1 锚点正向联动', () => {
     await page.getByTestId('open-project').first().click()
     await expect(page).toHaveURL(/\/project\//)
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
+    // 双侧就绪：iframe READY 只代表左侧原型好了；右侧 PRD 是异步 fetch +
+    // markdown 渲染，不等它会导致后续 ANCHOR_CLICK 早于 PRD 渲染到达——
+    // jumpToDocAnchor 查不到元素只弹 toast，高亮断言必挂（全量负载下复现）
+    await expect(
+      page.getByTestId('prd-content').locator('h2[data-pa="page-login"]'),
+    ).toBeVisible({ timeout: 10_000 })
   })
 
   test('PRD 渲染：锚点注释转 data-pa 属性且注释文本隐藏', async ({ page }) => {
@@ -144,15 +150,17 @@ test.describe('T3.1 锚点正向联动', () => {
     await protoFrame.locator('[data-pa="page-login"]').hover()
     await expect(icon).toBeVisible({ timeout: 5_000 })
 
-    // 鼠标移到非锚点空白处（section 间隙的 body 区域）→ 进入 1s 渐隐宽限期
-    // （icon 仍 display:flex，只是 opacity 过渡到 0——期间可接住）
+    // 鼠标移到非锚点空白处 → 进入 1s 渐隐宽限期（icon 仍 display:flex）
     await page.mouse.move(5, 300)
-    // 渐隐刚启动（<1s），icon 尚未隐藏：hover 到 icon 上应恢复常显
+    // 渐隐已启动：fading class 出现（证明宽限期生效、icon 未立即隐藏）
+    await expect(icon).toHaveClass(/pp-anchor-icon--fading/)
+
+    // 渐隐中 hover 到 icon 上：恢复常显（fading class 移除、opacity 回 1）
     await icon.hover({ timeout: 2_000 })
-    // 接住后：fading class 被移除（恢复不透明、常驻）
     await expect(icon).not.toHaveClass(/pp-anchor-icon--fading/)
 
-    // 接住状态下点击 → 正常发出 ANCHOR_CLICK，右侧高亮
+    // 接住状态下点击 → 正常发出 ANCHOR_CLICK，右侧高亮。
+    // click 用 icon 挂靠的锚点（page-login），不受途中 mouseover 切换影响
     await icon.click()
     const target = page.getByTestId('prd-content').locator('h2[data-pa="page-login"]')
     await expect(target).toHaveClass(/anchor-highlight/, { timeout: 3_000 })

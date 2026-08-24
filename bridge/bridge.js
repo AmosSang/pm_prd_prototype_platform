@@ -202,9 +202,9 @@
   // 目标，必须可接住）；之后只有鼠标同时离开 icon 和锚点区域才重新渐隐。
   // 嵌套锚点跳变修复：原型中组件锚点常在页面锚点内部（如按钮在
   // [data-pa=page-timer] main 里），离开组件走到祖先锚点的空白区域时
-  // mouseover 会打到祖先锚点 → icon 若换目标会瞬移闪跳。规定：祖先
-  // 地盘不换目标，等价「离开目标」→ 进入渐隐宽限期（icon 原地渐隐仍
-  // 可接住）；后代锚点（更具体）才正常切换目标。
+  // mouseover 会打到祖先锚点 → icon 若换目标会瞬移闪跳。规定：嵌套
+  // 锚点一律取最内层（mouseover closest 语义天然如此）；离开最内层后，
+  // 祖先地盘不切换（icon 原地渐隐仍可接住）；走到无关兄弟锚点才换目标。
   var anchorIcon = null
   var iconTarget = null // 当前 icon 挂靠的元素
   var iconState = 'hidden' // hidden | showing | fading（fading = 渐隐宽限期中）
@@ -233,9 +233,12 @@
     })
     anchorIcon.addEventListener('click', function (e) {
       e.stopPropagation()
-      if (iconTarget) {
+      // 用 dataset 快照（showIconFor 时写入）而非 iconTarget 变量——
+      // 「接住」状态下 iconTarget 可能被后来的 mouseover 切换到别的锚点
+      var anchorId = anchorIcon.dataset.paTarget
+      if (anchorId) {
         send('ANCHOR_CLICK', {
-          anchorId: iconTarget.getAttribute('data-pa'),
+          anchorId: anchorId,
           page: window.location.pathname,
         })
         // 点击反馈：icon 短暂变深色
@@ -289,6 +292,11 @@
 
   function showIconFor(el) {
     iconTarget = el
+    // 目标快照到 DOM：接住后（icon hover 常显但未重新 mouseover 目标区域）
+    // iconTarget 可能被后续 mouseover 切走，click 必须用 icon 位置对应的
+    // 锚点（用户看到 icon 挂在哪就定位哪），不能依赖可变闭包变量
+    anchorIcon = ensureIcon()
+    anchorIcon.dataset.paTarget = el.getAttribute('data-pa')
     positionIcon(el)
     cancelFade() // 新目标：无渐隐 class，实心显示
     anchorIcon.style.display = 'flex'
@@ -302,6 +310,7 @@
     if (anchorIcon) {
       anchorIcon.style.display = 'none'
       anchorIcon.classList.remove('pp-anchor-icon--fading') // 复位
+      delete anchorIcon.dataset.paTarget
     }
   }
 
