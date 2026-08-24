@@ -17,7 +17,7 @@ from flask import Blueprint, jsonify, request
 
 from server.config import DEMO_REPO_DIR
 from server.crypto_util import encrypt_token
-from server.gitops import CloneError, clone_project, repo_path
+from server.gitops import CloneError, clone_project, pull_project, repo_path
 from server.models import Project, utcnow_str
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
@@ -98,6 +98,30 @@ def git_status(pid: int):
     if not p:
         return _err("项目不存在", 404)
     return jsonify(code=0, data={"last_sync_at": p.last_sync_at, "sync_error": p.sync_error}), 200
+
+
+@bp.post("/<int:pid>/sync")
+def sync_project(pid: int):
+    """手动同步（临时按钮，T3.1 插入）：fetch + merge --ff-only 拉最新内容。
+
+    注意：这不是 T5.1 的完整 SYNC_PULL——后者还含 pull --rebase、
+    reviews/ 全量比对修正 DB、对账重算。本接口只做最简拉取 +
+    last_sync_at/sync_error 维护，T5.1 实现时将被替换。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    try:
+        pull_project(p.project_id, p.encrypted_token, p.branch)
+    except CloneError as e:
+        p.sync_error = e.hint
+        p.save()
+        return _err(e.hint, 400)
+
+    p.sync_error = None
+    p.last_sync_at = utcnow_str()
+    p.save()
+    return jsonify(code=0, data=_project_public(p)), 200
 
 
 # ───────────────────────── T2.4 查看器数据 ─────────────────────────

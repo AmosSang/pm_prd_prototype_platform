@@ -123,3 +123,32 @@ def _remove_tree(path: str) -> None:
     import shutil
 
     shutil.rmtree(path, ignore_errors=True)
+
+
+def pull_project(project_id: str, encrypted_token: str, branch: str) -> None:
+    """手动同步：fetch + merge --ff-only（临时同步按钮，T3.1 插入）。
+
+    T5.1 的完整 SYNC_PULL（pull --rebase + reviews/ 全量比对修正 DB +
+    对账重算）上线后本函数会被替换——此处只做最简拉取，不解析 reviews/。
+
+    抛 CloneError（沿用 clone 的错误分类文案）。
+    """
+    dest = repo_path(project_id)
+    if not os.path.isdir(dest):
+        raise CloneError("本地 clone 不存在，请重新绑定项目", "no local clone")
+
+    env, script = _askpass_env(decrypt_token(encrypted_token))
+    try:
+        repo = GitRepo(dest)
+        repo.git.fetch("origin", branch, env=env)
+        # ff-only：本地有未推提交时拒绝合并（报冲突提示，不破坏工作区）
+        repo.git.merge(f"origin/{branch}", "--ff-only", env=env)
+    except GitCommandError as e:
+        raw = (e.stderr or "") + (e.stdout or "")
+        if "Not possible to fast-forward" in raw or "divergent branches" in raw:
+            raise CloneError(
+                "本地与远端分叉，无法快进合并；请在仓库里手动处理后再同步", raw
+            ) from e
+        raise _classify_error(e, "pull") from e
+    finally:
+        _cleanup_askpass(script)

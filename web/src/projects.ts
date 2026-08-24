@@ -43,3 +43,8 @@ export function getPrd(id: number, file: string): Promise<{ file: string; conten
     `/api/projects/${id}/prd?file=${encodeURIComponent(file)}`,
   )
 }
+
+/** 手动同步（临时按钮，T3.1）：fetch + ff-only 拉最新。T5.1 会升级为完整 SYNC_PULL。 */
+export function syncProject(id: number): Promise<ProjectInfo> {
+  return api.post<ProjectInfo>(`/api/projects/${id}/sync`)
+}

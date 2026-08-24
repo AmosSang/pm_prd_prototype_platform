@@ -2,15 +2,19 @@
 import MarkdownIt from 'markdown-it'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { anchorPlugin } from '../anchor-plugin'
 import { getOverview, getPrd, listProjects, type ProjectOverview } from '../projects'
 
 /**
- * T2.4 分屏查看器骨架。
+ * T2.4 分屏查看器骨架 + T3.1 锚点正向联动。
  * 左：原型 iframe（:8081 独立 origin + sandbox + URL nonce，bridge.js 由代理注入）
- * 右：PRD markdown 渲染（markdown-it，多文档 el-select 切换）
+ * 右：PRD markdown 渲染（markdown-it + 锚点插件，多文档 el-select 切换）
  * 中：可拖动分割条（pointer 事件，父级相对宽度）
  *
- * 锚点体系（icon/联动/高亮）是 T3.x 范围，本卡只做纯渲染骨架。
+ * T3.1 正向联动：bridge 上报 ANCHOR_CLICK（点原型锚点 icon ◈）→
+ * 右侧 [data-pa] 元素 scrollIntoView + 高亮 2s（anchor-highlight class）。
+ * 反向联动（文档→原型）与跨页定位是 T3.2 范围。
  */
 
 const route = useRoute()
@@ -42,15 +46,51 @@ const iframeSrc = computed(() =>
 
 const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox'
 const ready = ref(false)
+const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
 
 function onMessage(event: MessageEvent) {
   const msg = event.data || {}
   if (event.origin !== PROTO_ORIGIN && event.origin !== 'null') return
   if (msg.nonce !== nonce) return
   if (msg.type === 'READY') ready.value = true
+  if (msg.type === 'ANCHOR_REPORT' && Array.isArray(msg.anchors)) {
+    anchorCount.value = msg.anchors.length
+  }
+  if (msg.type === 'ANCHOR_CLICK' && typeof msg.anchorId === 'string') {
+    jumpToDocAnchor(msg.anchorId)
+  }
+}
+
+// ───────────────────────── T3.1 正向联动 ─────────────────────────
+// 点原型锚点 icon → 右侧文档滚动到 [data-pa=id] 段落 + 高亮 2s。
+// 跨文档锚点（当前文档未命中时切文档再定位）留 T3.2，与反向跨页一起做。
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
+
+function jumpToDocAnchor(anchorId: string) {
+  const container = document.querySelector<HTMLElement>('[data-testid="prd-content"]')
+  const el = container?.querySelector<HTMLElement>(`[data-pa="${cssEscape(anchorId)}"]`) || null
+
+  if (!el) {
+    ElMessage.info(`锚点「${anchorId}」在当前文档中未找到（跨文档联动即将支持）`)
+    return
+  }
+
+  // 滚动定位（文档区滚动容器内平滑滚动）
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // 高亮 2s：先清旧 timer/class，再加新 class
+  if (highlightTimer) clearTimeout(highlightTimer)
+  document.querySelectorAll('.anchor-highlight').forEach((n) => n.classList.remove('anchor-highlight'))
+  el.classList.add('anchor-highlight')
+  highlightTimer = setTimeout(() => el.classList.remove('anchor-highlight'), 2000)
+}
+
+/** CSS.escape 兜底（锚点 ID 契约是 kebab-case，正常不会需要转义） */
+function cssEscape(s: string): string {
+  return window.CSS && CSS.escape ? CSS.escape(s) : s
 }
 
 const md = new MarkdownIt({ html: true, linkify: true })
+md.use(anchorPlugin)
 
 async function loadDoc(file: string) {
   if (!file || !overview.value) return
@@ -101,7 +141,10 @@ onMounted(async () => {
     currentDoc.value = overview.value.docs[0] || ''
   }
 })
-onBeforeUnmount(() => window.removeEventListener('message', onMessage))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onMessage)
+  if (highlightTimer) clearTimeout(highlightTimer)
+})
 </script>
 
 <template>
@@ -162,6 +205,9 @@ onBeforeUnmount(() => window.removeEventListener('message', onMessage))
             <el-option v-for="d in overview.docs" :key="d" :label="d" :value="d" />
           </el-select>
           <span v-else-if="overview.docs.length === 1" class="doc-name">{{ currentDoc }}</span>
+          <span class="anchor-count" data-testid="anchor-count" title="bridge 上报的本页锚点数">
+            锚点 {{ anchorCount }}
+          </span>
         </div>
         <div class="prd-scroll">
           <p v-if="docLoading" class="empty">加载中…</p>
@@ -223,6 +269,7 @@ onBeforeUnmount(() => window.removeEventListener('message', onMessage))
 .pane-head .ready { margin-left: auto; color: #999; font-size: 12px; }
 .pane-head .ready[data-ready="true"] { color: #2e9e44; }
 .pane-head .doc-name { color: #999; font-size: 12px; margin-left: auto; }
+.pane-head .anchor-count { color: #b8860b; font-size: 12px; margin-left: 8px; }
 
 .proto iframe {
   flex: 1;
@@ -282,6 +329,13 @@ onBeforeUnmount(() => window.removeEventListener('message', onMessage))
   margin: 12px 0;
   padding: 4px 16px;
   color: #57606a;
+}
+/* T3.1 正向联动高亮（点原型锚点 icon 后 2s） */
+.markdown-body :deep(.anchor-highlight) {
+  background: #fff3d6;
+  box-shadow: 0 0 0 3px #ffd66e;
+  border-radius: 4px;
+  transition: background 0.3s ease;
 }
 
 .loading { align-items: center; justify-content: center; }

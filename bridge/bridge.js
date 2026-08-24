@@ -3,13 +3,15 @@
  *
  * T1.1：READY / PING-ECHO 通信地基（URL nonce 认证）
  * T1.2：TAKE_SCREENSHOT 整页截图（modern-screenshot，沙箱兼容）+ Blob 回传 + highlight_rect 计算
+ * T3.1：锚点体系正向链路——[data-pa] 扫描上报（ANCHOR_REPORT）+ hover 锚点 icon（◈）
+ *        + 点击 icon 发 ANCHOR_CLICK（宿主侧滚动右侧文档并高亮 2s）
  *
  * 认证机制：sandbox（无 allow-same-origin）下 iframe origin 为不透明 "null"，
  * 无法按 origin 校验。采用 URL nonce：宿主在 iframe src 的 hash 中携带随机
  * nonce（#pp-nonce=xxx），bridge 每条消息回带，宿主校验匹配后才信任。
  *
  * 协议见《一期技术实现方案-V1.md》§2.2。约束：原生 JS、零依赖、幂等
- * （html2canvas 为平台自托管 vendor，从 /vendor/html2canvas.min.js 懒加载）。
+ * （modern-screenshot 为平台自托管 vendor，从 /vendor/modern-screenshot.mjs 懒加载）。
  */
 ;(function () {
   'use strict'
@@ -132,6 +134,186 @@
     }
   }
 
+  // ─── 锚点体系（T3.1，正向链路）─────────────────────────────
+  // 语义：[data-pa] 是「产品锚点」——PRD 与原型两侧共用的段落/组件标识。
+  // bridge 负责：扫描上报（ANCHOR_REPORT）、hover 挂 icon（◈）、点击上报
+  // （ANCHOR_CLICK，宿主滚动右侧文档并高亮）。反向 HIGHLIGHT_ANCHOR 在 T3.2。
+
+  /** 从元素向上到最近的 [data-pa] 祖先（无则到 body），拼 tag:nth-of-type(n) 链。 */
+  function cssPathOf(el) {
+    var parts = []
+    var node = el
+    while (node && node.nodeType === 1 && node !== document.body) {
+      var tag = node.tagName.toLowerCase()
+      if (node.hasAttribute('data-pa')) {
+        // 锚点祖先直接用属性选择器（全局唯一，链到此为止）
+        parts.unshift('[data-pa="' + node.getAttribute('data-pa') + '"]')
+        return parts.join(' > ')
+      }
+      var idx = 1
+      var sib = node
+      while ((sib = sib.previousElementSibling)) {
+        if (sib.tagName === node.tagName) idx++
+      }
+      parts.unshift(tag + ':nth-of-type(' + idx + ')')
+      node = node.parentElement
+    }
+    parts.unshift('body')
+    return parts.join(' > ')
+  }
+
+  /** 扫描本页全部 [data-pa]，[{id, cssPath}]。 */
+  function scanAnchors() {
+    var out = []
+    var els = document.querySelectorAll('[data-pa]')
+    for (var i = 0; i < els.length; i++) {
+      out.push({ id: els[i].getAttribute('data-pa'), cssPath: cssPathOf(els[i]) })
+    }
+    return out
+  }
+
+  /** 上报锚点清单（READY 时 + DOM 变化 debounce 后）。 */
+  var anchorReportTimer = null
+  function reportAnchors() {
+    send('ANCHOR_REPORT', { anchors: scanAnchors(), page: window.location.pathname })
+  }
+  function scheduleAnchorReport() {
+    clearTimeout(anchorReportTimer)
+    anchorReportTimer = setTimeout(reportAnchors, 300)
+  }
+
+  // MutationObserver：SPA/动态渲染场景下 DOM 变化后重报锚点。
+  // （T3.2 将扩展为 ROUTE_CHANGE 上报，这里先只重报锚点。）
+  var mo = new MutationObserver(function () {
+    scheduleAnchorReport()
+  })
+  function startObserver() {
+    mo.observe(document.documentElement, { childList: true, subtree: true })
+  }
+
+  // ─── 锚点 hover icon（◈）──────────────────────────────────
+  // 单例浮动 icon：pointer-events:auto，fixed 定位在目标元素左上角外侧；
+  // hover 到 [data-pa] 元素显示，移出/滚动时隐藏。点击 → ANCHOR_CLICK。
+  var anchorIcon = null
+  var iconTarget = null // 当前 icon 挂靠的元素
+
+  function ensureIcon() {
+    if (anchorIcon) return anchorIcon
+    var style = document.createElement('style')
+    style.textContent =
+      '.pp-anchor-icon{position:fixed;z-index:2147483647;cursor:pointer;' +
+      'display:none;align-items:center;justify-content:center;width:22px;height:22px;' +
+      'border-radius:6px;background:#2b5cff;color:#fff;font-size:13px;line-height:1;' +
+      'font-family:system-ui,sans-serif;user-select:none;box-shadow:0 1px 6px rgba(0,0,0,.25);}' +
+      '.pp-anchor-icon:hover{background:#1e4fd8;}'
+    document.head.appendChild(style)
+
+    anchorIcon = document.createElement('div')
+    anchorIcon.className = 'pp-anchor-icon'
+    anchorIcon.title = '定位到 PRD 对应段落'
+    anchorIcon.textContent = '◈'
+    anchorIcon.addEventListener('mousedown', function (e) {
+      e.preventDefault()
+      e.stopPropagation()
+    })
+    anchorIcon.addEventListener('click', function (e) {
+      e.stopPropagation()
+      if (iconTarget) {
+        send('ANCHOR_CLICK', {
+          anchorId: iconTarget.getAttribute('data-pa'),
+          page: window.location.pathname,
+        })
+        // 点击反馈：icon 短暂变深色
+        anchorIcon.style.background = '#1e4fd8'
+        setTimeout(function () {
+          anchorIcon.style.background = ''
+        }, 300)
+      }
+    })
+    document.body.appendChild(anchorIcon)
+    return anchorIcon
+  }
+
+  function positionIcon(el) {
+    var r = el.getBoundingClientRect()
+    var icon = ensureIcon()
+    // 默认放目标左上角外侧 26px；紧贴左缘时放右上角内侧 4px。
+    // 边界钳制：icon 必须完整落在 iframe 视口内——fixed 定位超出 iframe
+    // 视口的部分会被宿主页面元素覆盖（pointer events 被劫持，实测 E2E 中
+    // 超界 icon 被 .prd-scroll 拦截点击永远点不到）。
+    var x = r.left - 26
+    var y = r.top
+    if (x < 0) x = r.right + 4
+    var vw = window.innerWidth || document.documentElement.clientWidth
+    var vh = window.innerHeight || document.documentElement.clientHeight
+    if (x + 22 > vw) x = Math.max(0, vw - 22)
+    if (y + 22 > vh) y = Math.max(0, vh - 22)
+    if (y < 0) y = 0
+    icon.style.left = Math.round(x) + 'px'
+    icon.style.top = Math.round(y) + 'px'
+  }
+
+  function showIconFor(el) {
+    iconTarget = el
+    positionIcon(el)
+    anchorIcon.style.display = 'flex'
+  }
+
+  function hideIcon() {
+    iconTarget = null
+    if (anchorIcon) anchorIcon.style.display = 'none'
+  }
+
+  // 事件委托：mouseover/mouseout 打靶（只关心 [data-pa]，冒泡路径上最近一个）
+  document.addEventListener(
+    'mouseover',
+    function (e) {
+      // icon 自身：保持显示（icon 是浮层不是锚点元素，鼠标移上去不能把自己藏了）
+      if (e.target && e.target.classList && e.target.classList.contains('pp-anchor-icon')) return
+      var el = e.target && e.target.closest ? e.target.closest('[data-pa]') : null
+      if (el && el !== iconTarget) showIconFor(el)
+      else if (!el) hideIcon()
+    },
+    true,
+  )
+  document.addEventListener(
+    'mouseout',
+    function (e) {
+      // 移出到 icon 自身不算离开（icon 是 body 子节点，会触发 body 的 mouseover）
+      var to = e.relatedTarget
+      if (to && to.closest && to.closest('[data-pa]')) return
+      if (to && to.classList && to.classList.contains('pp-anchor-icon')) return
+      hideIcon()
+    },
+    true,
+  )
+  // 滚动/缩放时 icon 位置失效。优化策略：如果当前 hover 的目标元素仍在
+  // 视口内，滚动结束后重新定位（200ms debounce）而不是直接隐藏——
+  // 「滚动到深处锚点 → hover」场景下 Playwright 的 scrollIntoViewIfNeeded
+  // 与 mouseover 几乎同时发生，直接隐藏会吞掉刚触发的显示。
+  var scrollRepositionTimer = null
+  window.addEventListener(
+    'scroll',
+    function () {
+      if (iconTarget) {
+        clearTimeout(scrollRepositionTimer)
+        scrollRepositionTimer = setTimeout(function () {
+          if (iconTarget) {
+            var r = iconTarget.getBoundingClientRect()
+            var vh = window.innerHeight || document.documentElement.clientHeight
+            if (r.bottom > 0 && r.top < vh) {
+              positionIcon(iconTarget) // 还在视口内：重新定位，保持可点
+            } else {
+              hideIcon()
+            }
+          }
+        }, 200)
+      }
+    },
+    { capture: true, passive: true },
+  )
+  window.addEventListener('resize', hideIcon)
+
   // ─── 消息分发 ───────────────────────────────────────────────
 
   // 宿主 → iframe：来源 origin 与 referrer 一致 + nonce 匹配才接受
@@ -166,6 +348,8 @@
 
   function ready() {
     send('READY', { page: window.location.pathname })
+    reportAnchors() // 首次锚点清单随 READY 一起上报
+    startObserver()
   }
   if (document.readyState === 'complete') {
     ready()

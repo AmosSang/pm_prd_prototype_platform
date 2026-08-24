@@ -267,3 +267,88 @@ class TestViewerAPI:
         resp = client.get(f"/api/projects/{pid}/prd?file=prd/a.md")
         assert resp.status_code == 200
         assert resp.get_json()["data"]["content"] == "# PRD\n"
+
+
+# ───────────────────────── T3.1 手动同步（临时按钮） ─────────────────────────
+
+class TestSyncProject:
+    def test_sync_pulls_new_commit(self, app, tmp_path):
+        """远端 push 新提交 → sync → 本地 clone 更新 + last_sync_at 刷新。"""
+        client, repos_dir = app
+        remote = make_bare_remote(tmp_path, "sync")
+        resp = client.post("/api/projects", json={
+            "name": "同步项目", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        slug = resp.get_json()["data"]["project_id"]
+        pid = resp.get_json()["data"]["id"]
+        clone = os.path.join(repos_dir, slug)
+
+        # 远端加新文档 push（往裸仓库推：临时 work clone）
+        pushdir = tmp_path / "push-work"
+        subprocess.run(["git", "clone", "-q", remote, str(pushdir)], check=True, capture_output=True)
+        (pushdir / "prd" / "new.md").write_text("# 新文档\n")
+        subprocess.run(["git", "-C", str(pushdir), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(pushdir), "commit", "-qm", "add doc"], check=True)
+        subprocess.run(["git", "-C", str(pushdir), "push", "-q"], check=True, capture_output=True)
+
+        # 同步前本地无新文档
+        assert not os.path.exists(os.path.join(clone, "prd", "new.md"))
+
+        resp = client.post(f"/api/projects/{pid}/sync")
+        assert resp.status_code == 200, resp.get_json()
+        assert os.path.isfile(os.path.join(clone, "prd", "new.md"))
+        p = Project.get(Project.id == pid)
+        assert p.sync_error is None
+        assert p.last_sync_at is not None
+
+    def test_sync_already_up_to_date(self, app, tmp_path):
+        """无新提交时 sync 也成功（Already up to date 不算错误）。"""
+        client, _ = app
+        remote = make_bare_remote(tmp_path, "uptodate")
+        resp = client.post("/api/projects", json={
+            "name": "最新项目", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+
+        resp = client.post(f"/api/projects/{pid}/sync")
+        assert resp.status_code == 200
+
+    def test_sync_auth_error_sets_sync_error(self, app, tmp_path, fake_gitlab_401):
+        """远端不可达/认证失败：400 + 中文提示 + sync_error 落库。
+
+        注意：fetch 走本地 .git/config 里的 origin URL（不是 DB repo_url），
+        所以模拟方式是直接改 clone 的 remote URL（等价于远端后来挂了/token 过期）。
+        """
+        client, repos_dir = app
+        remote = make_bare_remote(tmp_path, "dead")
+        resp = client.post("/api/projects", json={
+            "name": "坏远端", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+        slug = Project.get(Project.id == pid).project_id
+        subprocess.run(
+            ["git", "-C", os.path.join(repos_dir, slug), "remote", "set-url", "origin", fake_gitlab_401],
+            check=True, capture_output=True,
+        )
+
+        resp = client.post(f"/api/projects/{pid}/sync")
+        assert resp.status_code == 400
+        assert "认证失败" in resp.get_json()["msg"]
+        assert "认证失败" in Project.get(Project.id == pid).sync_error
+
+    def test_sync_no_local_clone(self, app, tmp_path):
+        """本地 clone 被删：明确提示重新绑定。"""
+        client, repos_dir = app
+        remote = make_bare_remote(tmp_path, "gone")
+        resp = client.post("/api/projects", json={
+            "name": "被删项目", "repo_url": remote, "token": "tk", "branch": "main",
+        })
+        pid = resp.get_json()["data"]["id"]
+        slug = Project.get(Project.id == pid).project_id
+        import shutil
+
+        shutil.rmtree(os.path.join(repos_dir, slug))
+
+        resp = client.post(f"/api/projects/{pid}/sync")
+        assert resp.status_code == 400
+        assert "重新绑定" in resp.get_json()["msg"]

@@ -2,11 +2,12 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ApiError } from '../api'
-import { createProject, listProjects, type ProjectInfo } from '../projects'
+import { createProject, listProjects, syncProject, type ProjectInfo } from '../projects'
 
 const backendStatus = ref<'checking' | 'ok' | 'fail'>('checking')
 const projects = ref<ProjectInfo[]>([])
 const loading = ref(false)
+const syncingId = ref<number | null>(null) // 正在同步的项目 id
 
 // 新建项目对话框
 const dialogVisible = ref(false)
@@ -49,6 +50,24 @@ async function onSubmit() {
     ElMessage.error(e instanceof Error ? e.message : '绑定失败')
   } finally {
     creating.value = false
+  }
+}
+
+/** 手动同步（临时按钮）：拉远端最新内容后刷新列表。 */
+async function onSync(p: ProjectInfo) {
+  if (syncingId.value !== null) return
+  syncingId.value = p.id
+  try {
+    const updated = await syncProject(p.id)
+    ElMessage.success(`「${updated.name}」已同步到最新`)
+    await refresh()
+  } catch (e) {
+    if (!(e instanceof ApiError && e.code === 401)) {
+      ElMessage.error(e instanceof Error ? e.message : '同步失败')
+      await refresh() // sync_error 状态在卡片上可见
+    }
+  } finally {
+    syncingId.value = null
   }
 }
 
@@ -102,9 +121,19 @@ onMounted(async () => {
         <p class="meta">{{ p.project_id }} · {{ p.branch }}</p>
         <p class="repo" :title="p.repo_url">{{ p.repo_url }}</p>
         <p v-if="p.sync_error" class="err">同步异常：{{ p.sync_error }}</p>
-        <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
-          打开分屏查看器 →
-        </router-link>
+        <div class="card-actions">
+          <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
+            打开分屏查看器 →
+          </router-link>
+          <el-button
+            size="small"
+            :loading="syncingId === p.id"
+            :data-testid="`sync-${p.project_id}`"
+            @click="onSync(p)"
+          >
+            同步
+          </el-button>
+        </div>
       </div>
 
       <p v-if="projects.length === 0" class="hint">
@@ -192,7 +221,8 @@ onMounted(async () => {
   white-space: nowrap;
 }
 .card .err { color: #d33; font-size: 12px; }
-.card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; margin-top: 8px; }
+.card-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; }
 .card.demo { border-style: dashed; }
 .card a { color: #3b82f6; text-decoration: none; margin-right: 12px; font-size: 13px; }
 .hint { color: #999; font-size: 13px; }
