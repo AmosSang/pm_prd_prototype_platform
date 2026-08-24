@@ -12,6 +12,8 @@
  *        字段表见技术方案 §2.3）+ ROUTE_CHANGE（SPA 路由切换上报：
  *        pushState/replaceState monkey-patch + hashchange/popstate）
  * T4.2：COLLECT_PAGE——「评论本页」按钮触发页面根（body）payload 采集
+ * T4.4：SET_COMMENT_BADGES——宿主下发锚点评论数（{anchorId: count}），
+ *        常显角标挂锚点元素右上角（点击 COMMENT_BADGE_CLICK 开抽屉）
  *
  * 认证机制：sandbox（无 allow-same-origin）下 iframe origin 为不透明 "null"，
  * 无法按 origin 校验。采用 URL nonce：宿主在 iframe src 的 hash 中携带随机
@@ -632,7 +634,8 @@
       if (!commentMode) return
       var el = e.target
       if (!el || !el.closest) return
-      if (el.closest('.pp-anchor-icon')) return
+      // bridge 注入物（锚点 icon/评论角标）不是评论目标
+      if (el.closest('.pp-anchor-icon') || el.closest('.pp-comment-badge')) return
       if (el === document.documentElement || el === document.body) {
         clearCommentHover()
         return
@@ -663,13 +666,126 @@
       if (!commentMode) return
       var el = e.target
       if (!el || !el.closest) return
-      if (el.closest('.pp-anchor-icon')) return // bridge 注入物不是评论目标
+      // bridge 注入物（锚点 icon/评论角标）不是评论目标——角标点击要
+      // 触发自己的 COMMENT_BADGE_CLICK，不能被拦截采集
+      if (el.closest('.pp-anchor-icon') || el.closest('.pp-comment-badge')) return
       e.preventDefault()
       e.stopPropagation()
       send('ELEMENT_SELECTED', { payload: collectPayload(el) })
     },
     true,
   )
+
+  // ─── 评论角标（T4.4，产品方案 §4.5「同位置多条合并为带数量角标的 icon」）──
+  // 宿主 SET_COMMENT_BADGES {badges: {anchorId: count}}（只含当前页）：
+  // 为每个有评论的锚点常显数量角标（右上角），点击 → COMMENT_BADGE_CLICK
+  // （宿主打开评论抽屉）。定位复用锚点 icon 的视口钳制逻辑；滚动 debounce
+  // 重定位（与 icon 同款策略）。空对象 = 全清（评论删除/切筛选后）。
+
+  var badgeEls = {} // anchorId → 角标元素
+
+  function ensureBadgeStyle() {
+    var s = document.getElementById('pp-comment-badge-style')
+    if (s) return
+    s = document.createElement('style')
+    s.id = 'pp-comment-badge-style'
+    s.textContent =
+      '.pp-comment-badge{position:fixed;z-index:2147483646;min-width:18px;height:18px;' +
+      'padding:0 4px;border-radius:9px;background:#e5484d;color:#fff;font-size:11px;' +
+      'line-height:18px;text-align:center;font-family:system-ui,sans-serif;font-weight:600;' +
+      'cursor:pointer;user-select:none;box-shadow:0 1px 4px rgba(0,0,0,.3);}' +
+      '.pp-comment-badge:hover{background:#c93a3f;}'
+    document.head.appendChild(s)
+  }
+
+  function positionBadge(el, anchorEl) {
+    var r = anchorEl.getBoundingClientRect()
+    // 锚点右上角外侧（与左上角的锚点 icon 错开）
+    var x = r.right - 4
+    var y = r.top - 6
+    // 视口钳制（fixed 超界部分 pointer 被宿主劫持，同锚点 icon 教训）
+    var vw = window.innerWidth || document.documentElement.clientWidth
+    var vh = window.innerHeight || document.documentElement.clientHeight
+    if (x + 22 > vw) x = Math.max(0, vw - 22)
+    if (y + 18 > vh) y = Math.max(0, vh - 18)
+    if (y < 0) y = 0
+    el.style.left = Math.round(x) + 'px'
+    el.style.top = Math.round(y) + 'px'
+  }
+
+  function removeBadge(anchorId) {
+    var el = badgeEls[anchorId]
+    if (el) {
+      el.remove()
+      delete badgeEls[anchorId]
+    }
+  }
+
+  function setCommentBadges(badges) {
+    ensureBadgeStyle()
+    var next = badges || {}
+    // 清掉不再有评论的角标
+    Object.keys(badgeEls).forEach(function (aid) {
+      if (!next[aid]) removeBadge(aid)
+    })
+    Object.keys(next).forEach(function (aid) {
+      var anchorEl = document.querySelector('[data-pa="' + aid + '"]')
+      if (!anchorEl) return // 本页没有该锚点（宿主已按页过滤，兜底）
+      var count = next[aid]
+      var el = badgeEls[aid]
+      if (!el) {
+        el = document.createElement('div')
+        el.className = 'pp-comment-badge'
+        el.dataset.paTarget = aid
+        el.title = '查看该位置的评论'
+        el.addEventListener('click', function (e) {
+          e.stopPropagation()
+          send('COMMENT_BADGE_CLICK', { anchorId: aid, page: currentPage() })
+        })
+        document.body.appendChild(el)
+        badgeEls[aid] = el
+      }
+      el.textContent = String(count > 99 ? '99+' : count)
+      positionBadge(el, anchorEl)
+    })
+  }
+
+  // 滚动/缩放后重定位可见角标（与锚点 icon 同款 200ms debounce 策略；
+  // 出视口的锚点直接隐藏角标，回视口时滚动事件会再触发重定位）
+  var badgeScrollTimer = null
+  window.addEventListener(
+    'scroll',
+    function () {
+      if (!Object.keys(badgeEls).length) return
+      clearTimeout(badgeScrollTimer)
+      badgeScrollTimer = setTimeout(function () {
+        Object.keys(badgeEls).forEach(function (aid) {
+          var el = badgeEls[aid]
+          var anchorEl = document.querySelector('[data-pa="' + aid + '"]')
+          if (!anchorEl) {
+            el.style.display = 'none'
+            return
+          }
+          var r = anchorEl.getBoundingClientRect()
+          var vh = window.innerHeight || document.documentElement.clientHeight
+          if (r.bottom > 0 && r.top < vh) {
+            el.style.display = ''
+            positionBadge(el, anchorEl)
+          } else {
+            el.style.display = 'none'
+          }
+        })
+      }, 200)
+    },
+    { capture: true, passive: true },
+  )
+  window.addEventListener('resize', function () {
+    // 视口变化后重定位现有角标（宿主不会重发，不能清掉）
+    Object.keys(badgeEls).forEach(function (aid) {
+      var anchorEl = document.querySelector('[data-pa="' + aid + '"]')
+      if (anchorEl) positionBadge(badgeEls[aid], anchorEl)
+    })
+  })
 
   // ─── ROUTE_CHANGE（T4.1，SPA 路由切换上报）──────────────────
   // 多页原型的页面切换 = iframe src 变化 = 整页重载（READY 已覆盖）；
@@ -711,6 +827,8 @@
       // 页面评论目标为页面根元素（产品方案 §4.5），走 ELEMENT_SELECTED
       // 统一入口，宿主收到后弹评论框
       send('ELEMENT_SELECTED', { payload: collectPayload(document.body) })
+    } else if (msg.type === 'SET_COMMENT_BADGES') {
+      setCommentBadges(msg.badges || {})
     } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
       // 反向联动（T3.2）：false 表示本页没有该锚点（正常不会发生——
       // 宿主已按页面地图切页；万一落空回 ACK 让宿主 toast 提示）

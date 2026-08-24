@@ -5,6 +5,7 @@
 任务卡验收：T4.1 payload 字段完整性；T4.2 三类评论提交后
 DB 与 reviews/ 文件均出现（API 级验证，界面级走 E2E）。
 """
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -15,6 +16,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server.reviews import validate_comment_payload  # noqa: E402
+
+
+def dt_str_today() -> str:
+    """当日 YYYYMMDD（comment_id 前缀用）。"""
+    return dt.date.today().strftime("%Y%m%d")
 
 # 产品方案 §3.3 JSON 示例的 DOM 定位部分——契约基准样例，schema 必须放行
 BASE_PAYLOAD = {
@@ -135,54 +141,9 @@ def test_non_dict_rejected():
 from server.app import create_app  # noqa: E402
 from server.git_tasks import wait_tasks  # noqa: E402
 from server.models import Comment, GitTask, Project, db  # noqa: E402
-
-
-def make_anchor_remote(tmp_path, name: str = "cm") -> str:
-    """造带锚点（PRD 注释 + 原型 data-pa）的裸仓库远端。"""
-    work = tmp_path / f"{name}-work"
-    bare = tmp_path / f"{name}.git"
-    work.mkdir()
-    subprocess.run(["git", "init", "-b", "main", str(work)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t.local"], check=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
-    (work / "prototype").mkdir()
-    (work / "prototype" / "index.html").write_text(
-        '<html><body><main data-pa="page-login"><form data-pa="login-form">'
-        '<input data-pa="login-account" placeholder="账号"></form></main></body></html>',
-        encoding="utf-8",
-    )
-    (work / "prd").mkdir()
-    (work / "prd" / "需求.md").write_text(
-        "# PRD\n\n"
-        "## 5.1 登录页 <!-- pa: page-login -->\n\n"
-        "- 账号输入 <!-- pa: login-account -->：支持手机号\n\n"
-        "补充段落。\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(work), "commit", "-qm", "init"], check=True)
-    subprocess.run(["git", "clone", "--bare", str(work), str(bare)], check=True, capture_output=True)
-    return str(bare)
-
-
-def _dom_payload(**over) -> dict:
-    p = {
-        "target_type": "dom",
-        "prototype_page": "index.html",
-        "anchor_id": "login-account",
-        "nearest_anchor_id": "login-form",
-        "css_path": '[data-pa="login-account"]',
-        "outer_html": '<form data-pa="login-form"><input data-pa="login-account"></form>',
-        "text_excerpt": "账号",
-        "interaction_state": {
-            "modal_open": False,
-            "viewport": "1440x900",
-            "scroll_y": 0,
-            "route": "index.html",
-        },
-    }
-    p.update(over)
-    return p
+from tests.conftest import _git, _wait_ok, make_anchor_remote  # noqa: E402
+from tests.conftest import dom_payload as _dom_payload  # noqa: E402
+from tests.conftest import submit_comment as _submit  # noqa: E402
 
 
 @pytest.fixture()
@@ -217,12 +178,6 @@ def project(app, tmp_path):
     assert resp.status_code == 200, resp.get_json()
     p = Project.get(Project.name == "评论单测项目")
     return client, p
-
-
-def _submit(client, p, payload, **over):
-    body = {"payload": payload, "content": "测试评论内容", "priority": "P2", "scope": "prototype"}
-    body.update(over)
-    return client.post(f"/api/projects/{p.id}/comments", json=body)
 
 
 class TestCreateComment:
@@ -373,6 +328,30 @@ class TestCreateComment:
         assert c1.endswith("-001")
         assert c2.endswith("-002")
 
+    def test_comment_id_fills_gaps(self, app, project):
+        """cid 空洞场景：高位号已占（软删行/他项目），新评论填第一个空位，
+        不与已占用冲突（count+1 策略的实测 bug：004-007+008-010 并存时
+        count=7 → 008 撞已有行）。"""
+        client, p = project
+        # 预置：001-002 存在，003 缺失，004-005 存在（含一条软删行）
+        def _row(cid: str, deleted: bool = False) -> None:
+            Comment.create(
+                comment_id=cid, project=p.id,
+                author_email="pm@corp.com", author_name="产品桑",
+                status="待确认", priority="P2", scope="prototype", target_type="dom",
+                payload_json="{}", deleted=deleted,
+            )
+
+        _row(f"c-{dt_str_today()}-001")
+        _row(f"c-{dt_str_today()}-002")
+        _row(f"c-{dt_str_today()}-004")
+        _row(f"c-{dt_str_today()}-005", deleted=True)  # 软删行也占用 cid
+
+        resp = _submit(client, p, _dom_payload())
+        assert resp.status_code == 200, resp.get_json()
+        cid = resp.get_json()["data"]["comment_id"]
+        assert cid.endswith("-003")  # 填第一个空位，不撞 004/005（软删行也占用）
+
     def test_invalid_payload_rejected(self, app, project):
         """payload 缺字段：400 且 DB 无行。"""
         client, p = project
@@ -433,3 +412,216 @@ class TestCreateComment:
         # sync_error 落库（首页红点提示用）
         p2 = Project.get_by_id(p.id)
         assert p2.sync_error
+
+
+# ═══════════════════════ T4.4 列表 / 编辑 / 删除 / 批量状态 ═══════════════════════
+
+
+def _submit_simple(client, p, **over) -> str:
+    """快捷提交一条 dom 评论，返回 comment_id（队列同步跑完）。"""
+    resp = _submit(client, p, _dom_payload(**over))
+    assert resp.status_code == 200, resp.get_json()
+    cid = resp.get_json()["data"]["comment_id"]
+    return cid
+
+
+class TestListComments:
+    def test_list_fields_and_filters(self, app, project):
+        """列表：字段完整 + 筛选参数（status/target_type）+ 软删不返回。"""
+        client, p = project
+        c1 = _submit_simple(client, p)                       # dom 待确认
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")  # dom 无锚点
+        c3 = _submit_simple(client, p, target_type="page", anchor_id="",
+                            nearest_anchor_id="", css_path="body", outer_html="")
+
+        resp = client.get(f"/api/projects/{p.id}/comments")
+        assert resp.status_code == 200
+        items = resp.get_json()["data"]
+        assert [i["comment_id"] for i in items] == [c1, c2, c3]
+        item = items[0]
+        assert item["status"] == "待确认"
+        assert item["target_type"] == "dom"
+        assert item["prototype_page"] == "index.html"
+        assert item["anchor_id"] == "login-account"
+        assert item["payload"]["content"] == "测试评论内容"
+
+        # 筛选：target_type
+        resp = client.get(f"/api/projects/{p.id}/comments?target_type=page")
+        assert [i["comment_id"] for i in resp.get_json()["data"]] == [c3]
+        # 筛选：status（先流转 c1 再验）
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        resp = client.get(f"/api/projects/{p.id}/comments?status=已确认待修改")
+        assert [i["comment_id"] for i in resp.get_json()["data"]] == [c1]
+
+        # 软删不返回
+        client.delete(f"/api/comments/{c2}")
+        resp = client.get(f"/api/projects/{p.id}/comments")
+        assert [i["comment_id"] for i in resp.get_json()["data"]] == [c1, c3]
+
+
+class TestBatchStatus:
+    def test_confirm_full_chain(self, app, project):
+        """批量确认（任务卡验收）：DB 流转 + 落仓 JSON status 变更 + git log。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1, c2], "action": "confirm",
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["to"] == "已确认待修改"
+        assert sorted(data["updated"]) == sorted([c1, c2])
+        assert data["skipped"] == []
+        _wait_ok()
+
+        # DB 流转
+        for cid in (c1, c2):
+            assert Comment.get(Comment.comment_id == cid).status == "已确认待修改"
+        # 落仓 JSON + git log（每条一个 commit）
+        root = Path(app[1]) / p.project_id
+        for cid in (c1, c2):
+            fj = json.loads((root / "reviews" / "comments" / f"{cid}.json").read_text(encoding="utf-8"))
+            assert fj["status"] == "已确认待修改"
+        msgs = _git(root, "log", "--format=%s").split("\n")
+        assert f"comment: {c2} → 已确认待修改" in msgs
+        assert f"comment: {c1} → 已确认待修改" in msgs
+        assert msgs[0] == f"comment: {c2} → 已确认待修改"  # 后确认的在顶
+
+    def test_ignore_from_both_states(self, app, project):
+        """忽略：待确认与已确认待修改都可忽略（旁路）。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "confirm"})
+
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1, c2], "action": "ignore",
+        })
+        data = resp.get_json()["data"]
+        assert sorted(data["updated"]) == sorted([c1, c2])
+        for cid in (c1, c2):
+            assert Comment.get(Comment.comment_id == cid).status == "忽略"
+
+    def test_invalid_transitions_skipped(self, app, project):
+        """状态机：已忽略不可再 confirm/ignore（跳过并报告）。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
+
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        data = resp.get_json()["data"]
+        assert data["updated"] == []
+        assert len(data["skipped"]) == 1
+        assert "不可confirm" in data["skipped"][0]["reason"]
+
+        # 不存在的 cid 跳过
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": ["c-20990101-999"], "action": "confirm",
+        })
+        assert resp.get_json()["data"]["skipped"][0]["reason"] == "不存在"
+
+    def test_bad_request_rejected(self, app, project):
+        client, p = project
+        assert client.post("/api/comments/batch-status", json={
+            "cids": ["x"], "action": "reopen",
+        }).status_code == 400
+        assert client.post("/api/comments/batch-status", json={
+            "cids": [], "action": "confirm",
+        }).status_code == 400
+
+
+class TestEditComment:
+    def test_edit_by_author(self, app, project):
+        """作者编辑：DB + payload 更新，落仓 JSON 同步（COMMIT_EDIT）。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+
+        resp = client.patch(f"/api/comments/{c1}", json={
+            "content": "改后的评论内容", "priority": "P1", "scope": "both",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        row = Comment.get(Comment.comment_id == c1)
+        assert row.priority == "P1"
+        assert row.scope == "both"
+        assert json.loads(row.payload_json)["content"] == "改后的评论内容"
+        _wait_ok()
+
+        root = Path(app[1]) / p.project_id
+        fj = json.loads((root / "reviews" / "comments" / f"{c1}.json").read_text(encoding="utf-8"))
+        assert fj["content"] == "改后的评论内容"
+        assert fj["priority"] == "P1"
+        assert _git(root, "log", "-1", "--format=%s") == f"comment: {c1} 编辑"
+
+    def test_edit_rules(self, app, project):
+        """编辑规则：非作者拒；已确认待修改可编辑；忽略态拒；空内容拒。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+
+        # 已确认待修改 → 可编辑
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        assert client.patch(f"/api/comments/{c1}", json={"content": "确认后编辑"}).status_code == 200
+
+        # 忽略 → 不可编辑
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
+        resp = client.patch(f"/api/comments/{c1}", json={"content": "x"})
+        assert resp.status_code == 400
+        assert "不可编辑" in resp.get_json()["msg"]
+
+        # 非作者（换 session 用户）
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        resp = client.patch(f"/api/comments/{c2}", json={"content": "别人改"})
+        assert resp.status_code == 403
+        with client.session_transaction() as sess:
+            sess["uid"] = 1
+            sess["email"] = "pm@corp.com"
+            sess["name"] = "产品桑"
+
+        # 空内容 / 无字段
+        assert client.patch(f"/api/comments/{c2}", json={"content": " "}).status_code == 400
+        assert client.patch(f"/api/comments/{c2}", json={}).status_code == 400
+
+
+class TestDeleteComment:
+    def test_delete_by_author(self, app, project):
+        """作者删除：软删 DB + git rm 文件（COMMIT_DELETE）。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+
+        resp = client.delete(f"/api/comments/{c1}")
+        assert resp.status_code == 200
+        # 软删：行还在但 deleted=1，列表不返回
+        row = Comment.get(Comment.comment_id == c1)
+        assert row.deleted is True
+        assert client.get(f"/api/projects/{p.id}/comments").get_json()["data"] == []
+
+        _wait_ok()
+        root = Path(app[1]) / p.project_id
+        assert not (root / "reviews" / "comments" / f"{c1}.json").exists()
+        assert _git(root, "log", "-1", "--format=%s") == f"comment: {c1} 删除"
+
+    def test_delete_rules(self, app, project):
+        """删除规则：忽略态拒；非作者拒；重复删 404。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
+        assert client.delete(f"/api/comments/{c1}").status_code == 400
+
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        assert client.delete(f"/api/comments/{c2}").status_code == 403
+        with client.session_transaction() as sess:
+            sess["uid"] = 1
+            sess["email"] = "pm@corp.com"
+            sess["name"] = "产品桑"
+
+        assert client.delete(f"/api/comments/{c2}").status_code == 200
+        assert client.delete(f"/api/comments/{c2}").status_code == 404

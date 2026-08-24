@@ -6,13 +6,16 @@ import { ElMessage } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
 import { currentUser } from '../auth'
 import CommentBox from '../components/CommentBox.vue'
+import CommentDrawer from '../components/CommentDrawer.vue'
 import {
   createComment,
   getOverview,
   getPrd,
   getReconcile,
+  listComments,
   listProjects,
   uploadShot,
+  type CommentItem,
   type CommentPayload,
   type CreateCommentResult,
   type HighlightRect,
@@ -200,6 +203,7 @@ async function submitComment(form: { content: string; priority: string; scope: s
     // T4.3：git 落仓走异步队列（git_task pending），提交不再被 git 结果
     // 阻塞；失败会置项目 sync_error（首页卡片「同步异常」提示）
     submittedResult.value = res
+    refreshComments() // T4.4：更新抽屉数据 + 原型角标
   } catch (e) {
     submitError.value = e instanceof Error ? e.message : '提交失败，请重试'
     if (!isDoc && commentMode.value) postSetCommentMode(true)
@@ -217,6 +221,8 @@ function onMessage(event: MessageEvent) {
     // 评论模式 sticky：iframe 重载（切页/重导航）后 bridge 内存状态归零，
     // 开关若开着须重发（否则新页点击不采集）
     if (commentMode.value) postSetCommentMode(true)
+    // 角标 sticky：切页后重发当前页角标（评论数据已在宿主内存）
+    syncBadges()
     // 跨页定位：切页后等 READY 再发 HIGHLIGHT_ANCHOR（技术方案 §2.5）
     if (pendingHighlight.value) {
       const anchorId = pendingHighlight.value
@@ -262,6 +268,48 @@ function onMessage(event: MessageEvent) {
     currentRoute.value =
       (typeof msg.route === 'string' && msg.route) || String(msg.page || '')
   }
+  if (msg.type === 'COMMENT_BADGE_CLICK' && typeof msg.anchorId === 'string') {
+    // T4.4：点原型角标 → 打开抽屉看该位置评论
+    drawerOpen.value = true
+    refreshComments()
+  }
+}
+
+// ───────────────────────── T4.4 评论抽屉 + 原型角标 ─────────────────────────
+const drawerOpen = ref(false)
+const comments = ref<CommentItem[]>([])
+
+async function refreshComments() {
+  if (!overview.value) return
+  try {
+    comments.value = await listComments(overview.value.project.id)
+  } catch {
+    /* 抽屉打开失败不打断主流程，下次再拉 */
+  }
+  syncBadges()
+}
+
+function toggleDrawer() {
+  drawerOpen.value = !drawerOpen.value
+  if (drawerOpen.value) refreshComments()
+}
+
+/** 角标下发：当前页（entry 剥 prototype/ 前缀对齐评论 prototype_page 口径）
+ * 的锚点 → 未删除评论数（含 doc_block 之外的原型评论；doc_block 无原型角标）。 */
+function syncBadges() {
+  if (!ready.value || !overview.value) return
+  const page = currentEntry.value.replace(/^prototype\//, '')
+  const counts: Record<string, number> = {}
+  for (const c of comments.value) {
+    if (c.target_type === 'doc_block') continue
+    if (c.prototype_page !== page) continue
+    const anchor = c.anchor_id || c.payload.nearest_anchor_id || ''
+    if (anchor) counts[anchor] = (counts[anchor] || 0) + 1
+  }
+  iframeEl.value?.contentWindow?.postMessage(
+    { type: 'SET_COMMENT_BADGES', badges: counts, nonce },
+    '*',
+  )
 }
 
 // ───────────────────────── 锚点联动（T3.1 正向 / T3.2 反向）─────────────
@@ -536,6 +584,7 @@ onMounted(async () => {
   if (overview.value) {
     currentEntry.value = overview.value.proto_entries[0] || ''
     currentDoc.value = overview.value.docs[0] || ''
+    refreshComments() // T4.4：初始角标（含打开过的抽屉数据）
   }
 })
 onBeforeUnmount(() => {
@@ -560,6 +609,15 @@ onBeforeUnmount(() => {
           @change="onCommentModeChange"
         />
       </span>
+      <!-- T4.4 评论抽屉开关：按页面分组 / 筛选 / 批量确认忽略 -->
+      <button
+        class="drawer-toggle"
+        :class="{ open: drawerOpen }"
+        data-testid="drawer-toggle"
+        @click="toggleDrawer"
+      >
+        评论 {{ comments.length }}
+      </button>
       <!-- T3.3 对账提示条：匹配 · 缺失 · 未描述（点击看明细） -->
       <span
         v-if="reconSummary"
@@ -683,6 +741,15 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </div>
+
+    <!-- T4.4 评论列表抽屉（产品方案 §4.4 底部横条） -->
+    <CommentDrawer
+      v-if="drawerOpen"
+      :project-id="overview.project.id"
+      :comments="comments"
+      :current-user-email="currentUser?.email || ''"
+      @refresh="refreshComments"
+    />
   </main>
 
   <main v-else class="viewer loading">
@@ -915,6 +982,23 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: #57606a;
   white-space: nowrap;
+}
+
+/* T4.4 评论抽屉开关 */
+.v-head .drawer-toggle {
+  border: 1px solid #d9dce1;
+  border-radius: 4px;
+  background: #fff;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: #57606a;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.v-head .drawer-toggle:hover,
+.v-head .drawer-toggle.open {
+  border-color: #2b5cff;
+  color: #2b5cff;
 }
 .pane-head .route-tag {
   color: #999;

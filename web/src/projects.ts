@@ -164,6 +164,56 @@ export function createComment(
   return api.post<CreateCommentResult>(`/api/projects/${id}/comments`, body)
 }
 
+// ───────────────────────── 评论列表/编辑/删除/批量状态（T4.4）──────────────────
+
+export type CommentStatus = '待确认' | '已确认待修改' | '已修改' | '忽略'
+
+/** 评论列表条目（GET /comments 响应；payload 为评论 JSON 全量） */
+export interface CommentItem {
+  comment_id: string
+  author_name: string
+  author_email: string
+  status: CommentStatus
+  priority: string
+  scope: string
+  target_type: 'dom' | 'page' | 'doc_block'
+  prototype_page: string
+  anchor_id: string
+  created_at: string
+  payload: {
+    content: string
+    text_excerpt?: string
+    doc_excerpt?: string
+    nearest_anchor_id?: string
+    doc_path?: string
+    doc_file?: string
+    screenshot?: string
+    [k: string]: unknown
+  }
+}
+
+export function listComments(id: number): Promise<CommentItem[]> {
+  return api.get<CommentItem[]>(`/api/projects/${id}/comments`)
+}
+
+export function editComment(
+  cid: string,
+  body: { content?: string; priority?: string; scope?: string },
+): Promise<{ comment_id: string; updated: string[] }> {
+  return api.patch(`/api/comments/${cid}`, body)
+}
+
+export function deleteComment(cid: string): Promise<{ comment_id: string; deleted: boolean }> {
+  return api.delete(`/api/comments/${cid}`)
+}
+
+export function batchStatus(
+  cids: string[],
+  action: 'confirm' | 'ignore',
+): Promise<{ action: string; to: string; updated: string[]; skipped: { comment_id: string; reason: string }[] }> {
+  return api.post('/api/comments/batch-status', { cids, action })
+}
+
 /** 截图上传（T1.2 链路）：Blob → /shots 临时区，返回访问 URL（预览用）。
  * slug 口径：临时区目录名与 /data/repos/{slug} 一致，评论提交时后端按 slug 取文件。 */
 export function uploadShot(

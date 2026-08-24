@@ -9,6 +9,8 @@
   add/commit/push。
 - COMMIT_STATUS：评论状态变更（T4.4 的确认/忽略/返工调用）。tracked 文件
   的修改必须在 worker 内串行做（API 侧直接改会与 rebase 竞态）。
+- COMMIT_EDIT：作者编辑评论内容（T4.4 的 PATCH 调用）。tracked 文件的
+  content/priority/scope 修改同在 worker 内串行做。
 - COMMIT_DELETE：删除评论文件与截图（T4.4 的删除调用）。
 
 失败语义（不阻塞评论）：DB 与文件已落，git 失败只置任务 error +
@@ -127,6 +129,22 @@ def _execute(task: GitTask, p: Project, item: dict) -> tuple[str | None, int]:
             item["author_name"], item["author_email"],
             paths=[f"reviews/comments/{task.ref_id}.json"],
         )
+    if task.task_type == "COMMIT_EDIT":
+        # 作者编辑：tracked 文件的 content/priority/scope 修改（worker 内串行）
+        fpath = os.path.join(root, "reviews", "comments", f"{task.ref_id}.json")
+        if not os.path.isfile(fpath):
+            return f"评论文件不存在：{task.ref_id}", 0
+        with open(fpath, encoding="utf-8") as f:
+            cj = json.load(f)
+        cj.update(item["fields"])
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(cj, f, ensure_ascii=False, indent=2)
+        return commit_and_push(
+            p.project_id, p.encrypted_token, p.branch,
+            f"comment: {task.ref_id} 编辑",
+            item["author_name"], item["author_email"],
+            paths=[f"reviews/comments/{task.ref_id}.json"],
+        )
     if task.task_type == "COMMIT_DELETE":
         return commit_and_push(
             p.project_id, p.encrypted_token, p.branch,
@@ -202,6 +220,17 @@ def enqueue_delete(
     return _enqueue(
         "COMMIT_DELETE", project, comment_id,
         author_name=author_name, author_email=author_email,
+    )
+
+
+def enqueue_edit(
+    project: Project, comment_id: str, fields: dict,
+    author_name: str, author_email: str,
+) -> GitTask:
+    """COMMIT_EDIT：作者编辑评论（T4.4 PATCH 调用；先更新 DB 再入队）。"""
+    return _enqueue(
+        "COMMIT_EDIT", project, comment_id,
+        fields=fields, author_name=author_name, author_email=author_email,
     )
 
 

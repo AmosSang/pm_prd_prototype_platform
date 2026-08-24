@@ -26,9 +26,10 @@ import os
 import re
 import shutil
 
+import peewee
 from flask import Blueprint, jsonify, request, session
 
-from server.git_tasks import enqueue_comment
+from server.git_tasks import enqueue_comment, enqueue_delete, enqueue_edit, enqueue_status
 from server.models import Comment, Project, utcnow_str
 from server.projects import _list_md_files, _repo_root
 from server.reconcile import extract_prd_anchors
@@ -193,17 +194,27 @@ def _fingerprint(doc_path: str, excerpt: str) -> str:
 
 
 def _next_comment_id(root: str) -> str:
-    """comment_id 生成：c-YYYYMMDD-NNN（当日序号）。
+    """comment_id 生成：c-YYYYMMDD-NNN（当日序号，全局唯一）。
 
-    序号 = DB 当日已有数 + 1；落仓前检查文件是否已存在（外部写入可能，
-    如 skill 手工建过同名文件），冲突顺延。
+    已占用集合 = DB 当日全部 cid（含软删行——UNIQUE 约束不豁免）+ 本项目
+    仓库已存在的同名文件（外部写入可能，如 skill 手工建过）。从 1 起找
+    第一个空位——不能用 count+1：cid 有空洞时（删行/软删/外部写入）会
+    生成已占用的高位号（实测：004-007 与 008-010 并存，count=7 → 008 撞）。
     """
     prefix = f"c-{dt.date.today().strftime('%Y%m%d')}-"
-    n = Comment.select().where(Comment.comment_id.startswith(prefix)).count()
+    used = {
+        row[0]
+        for row in Comment.select(Comment.comment_id)
+        .where(Comment.comment_id.startswith(prefix))
+        .tuples()
+    }
+    n = 0
     while True:
         n += 1
         cid = f"{prefix}{n:03d}"
-        if not os.path.exists(os.path.join(root, "reviews", "comments", f"{cid}.json")):
+        if cid not in used and not os.path.exists(
+            os.path.join(root, "reviews", "comments", f"{cid}.json")
+        ):
             return cid
 
 
@@ -334,27 +345,39 @@ def create_comment(pid: int):
         candidate = payload.get("anchor_id") or payload.get("nearest_anchor_id") or ""
         doc = _match_doc_anchor(root, str(candidate))
 
-    # comment_id → 评论 JSON → DB（先落，git 异常不阻塞评论体验）
-    cid = _next_comment_id(root)
-    shot_rel = f"shots/{cid}.png" if shot_src else None
-    cj = _build_comment_json(
-        cid, session["name"], payload, content, priority, scope, doc, shot_rel, rect
-    )
-    Comment.create(
-        comment_id=cid,
-        project=p.id,
-        author_email=session["email"],
-        author_name=session["name"],
-        status=cj["status"],
-        priority=priority,
-        scope=scope,
-        target_type=cj["target_type"],
-        prototype_page=cj["prototype_page"] or None,
-        anchor_id=cj["anchor_id"] or None,
-        payload_json=json.dumps(cj, ensure_ascii=False),
-        created_at=utcnow_str(),
-        updated_at=utcnow_str(),
-    )
+    # comment_id → DB 先落（UNIQUE 兜底重试）→ 文件 → 入队。
+    # 并发提交（多 worker E2E / 多用户）下 count 读到相同值会生成重复 cid，
+    # UNIQUE 约束拦截后重算顺延（最多 5 次；极端并发下仍失败返回 500）
+    cj = None
+    row = None
+    for _ in range(5):
+        cid = _next_comment_id(root)
+        shot_rel = f"shots/{cid}.png" if shot_src else None
+        cj = _build_comment_json(
+            cid, session["name"], payload, content, priority, scope, doc, shot_rel, rect
+        )
+        try:
+            row = Comment.create(
+                comment_id=cid,
+                project=p.id,
+                author_email=session["email"],
+                author_name=session["name"],
+                status=cj["status"],
+                priority=priority,
+                scope=scope,
+                target_type=cj["target_type"],
+                prototype_page=cj["prototype_page"] or None,
+                anchor_id=cj["anchor_id"] or None,
+                payload_json=json.dumps(cj, ensure_ascii=False),
+                created_at=utcnow_str(),
+                updated_at=utcnow_str(),
+            )
+            break
+        except peewee.IntegrityError:
+            continue
+    if row is None or cj is None:
+        return jsonify(code=500, msg="评论 ID 生成冲突，请重试"), 500
+    cid = cj["comment_id"]
 
     # 落仓（T4.3 队列）：文件先写（新文件 untracked，与 worker 的 git 操作
     # 无竞态），git add/commit/push 入队由每项目串行 worker 执行——请求即
@@ -377,3 +400,172 @@ def create_comment(pid: int):
         code=0,
         data={**cj, "git_task": {"id": task.id, "status": task.status}},
     ), 200
+
+
+# ───────────────────────── 评论列表 / 编辑 / 删除 / 批量状态（T4.4）──────────
+
+# 状态四态（产品方案 §3.4）：待确认 → 已确认待修改 → 已修改；忽略为旁路。
+# 可编辑/可删除态：待确认、已确认待修改（已修改/忽略只读，返工走 T5.2）
+EDITABLE_STATUSES = ("待确认", "已确认待修改")
+
+# 批量动作的合法源状态（batch-status 状态机）
+BATCH_ACTIONS = {
+    "confirm": {"from": ("待确认",), "to": "已确认待修改"},
+    "ignore": {"from": ("待确认", "已确认待修改"), "to": "忽略"},
+}
+
+
+def _comment_public(c: Comment) -> dict:
+    """列表条目：筛选列 + payload 全量（抽屉分组/角标/详情用）。"""
+    cj = json.loads(c.payload_json)
+    return {
+        "comment_id": c.comment_id,
+        "author_name": c.author_name,
+        "author_email": c.author_email,
+        "status": c.status,
+        "priority": c.priority,
+        "scope": c.scope,
+        "target_type": c.target_type,
+        "prototype_page": c.prototype_page or "",
+        "anchor_id": c.anchor_id or "",
+        "created_at": c.created_at,
+        "payload": cj,
+    }
+
+
+@bp.get("/api/projects/<int:pid>/comments")
+def list_comments(pid: int):
+    """评论列表（T4.4 抽屉数据源）。
+
+    筛选参数：status（四态）、target_type（dom/page/doc_block）。
+    前端抽屉也做本地筛选（数据量小即时切换）；服务端参数供 API 消费方。
+    排序：创建时间正序（新评论在组内靠后，符合阅读直觉）。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return jsonify(code=404, msg="项目不存在"), 404
+
+    q = Comment.select().where(Comment.project == p.id, Comment.deleted == False)  # noqa: E712
+    status = request.args.get("status", "").strip()
+    if status:
+        q = q.where(Comment.status == status)
+    tt = request.args.get("target_type", "").strip()
+    if tt:
+        q = q.where(Comment.target_type == tt)
+    rows = q.order_by(Comment.id.asc())
+    return jsonify(code=0, data=[_comment_public(c) for c in rows]), 200
+
+
+def _get_live_comment(cid: str) -> Comment | None:
+    """按 comment_id 查未删除评论；不存在/已删返回 None。"""
+    return Comment.get_or_none(Comment.comment_id == cid, Comment.deleted == False)  # noqa: E712
+
+
+@bp.patch("/api/comments/<cid>")
+def edit_comment(cid: str):
+    """作者编辑（产品方案 §4.5 编辑规则）：仅作者 + 待确认/已确认待修改态。
+
+    可改 content / priority / scope；DB 先更新，文件修改入队（COMMIT_EDIT，
+    tracked 文件在 worker 内串行改）。
+    """
+    c = _get_live_comment(cid)
+    if not c:
+        return jsonify(code=404, msg="评论不存在"), 404
+    if c.author_email != session.get("email"):
+        return jsonify(code=403, msg="仅评论作者可编辑"), 403
+    if c.status not in EDITABLE_STATUSES:
+        return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
+
+    data = request.get_json(silent=True) or {}
+    fields: dict = {}
+    if "content" in data:
+        content = str(data.get("content") or "").strip()
+        if not content:
+            return jsonify(code=400, msg="评论内容不能为空"), 400
+        if len(content) > CONTENT_MAX:
+            return jsonify(code=400, msg=f"评论内容超过 {CONTENT_MAX} 字"), 400
+        fields["content"] = content
+    if "priority" in data:
+        priority = str(data.get("priority") or "")
+        if priority not in PRIORITIES:
+            return jsonify(code=400, msg=f"priority 必须是 {PRIORITIES} 之一"), 400
+        fields["priority"] = priority
+    if "scope" in data:
+        scope = str(data.get("scope") or "")
+        if scope not in SCOPES:
+            return jsonify(code=400, msg=f"scope 必须是 {SCOPES} 之一"), 400
+        fields["scope"] = scope
+    if not fields:
+        return jsonify(code=400, msg="没有可更新字段（content/priority/scope）"), 400
+
+    c.payload_json = json.dumps({**json.loads(c.payload_json), **fields}, ensure_ascii=False)
+    if "priority" in fields:
+        c.priority = fields["priority"]
+    if "scope" in fields:
+        c.scope = fields["scope"]
+    c.updated_at = utcnow_str()
+    c.save()
+
+    p = c.project
+    enqueue_edit(p, cid, fields, session["name"], session["email"])
+    return jsonify(code=0, data={"comment_id": cid, "updated": list(fields.keys())}), 200
+
+
+@bp.delete("/api/comments/<cid>")
+def delete_comment(cid: str):
+    """作者删除（仅待确认/已确认待修改态）：软删 DB + 入队 git rm。"""
+    c = _get_live_comment(cid)
+    if not c:
+        return jsonify(code=404, msg="评论不存在"), 404
+    if c.author_email != session.get("email"):
+        return jsonify(code=403, msg="仅评论作者可删除"), 403
+    if c.status not in EDITABLE_STATUSES:
+        return jsonify(code=400, msg=f"「{c.status}」状态的评论不可删除"), 400
+
+    c.deleted = True
+    c.updated_at = utcnow_str()
+    c.save()
+    enqueue_delete(c.project, cid, session["name"], session["email"])
+    return jsonify(code=0, data={"comment_id": cid, "deleted": True}), 200
+
+
+@bp.post("/api/comments/batch-status")
+def batch_status():
+    """批量状态流转（产品方案 §4.5：PM 批量确认/忽略）。
+
+    状态机：confirm（待确认 → 已确认待修改）、ignore（待确认/已确认待修改
+    → 忽略）。返工（已修改 → 已确认待修改）是 T5.2 范围。逐条：合法则
+    DB 更新 + 入队 COMMIT_STATUS，非法（状态不符/不存在）跳过并报告。
+    """
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "")
+    cids = data.get("cids")
+    if action not in BATCH_ACTIONS:
+        return jsonify(code=400, msg=f"action 必须是 {tuple(BATCH_ACTIONS)} 之一"), 400
+    if not isinstance(cids, list) or not cids or len(cids) > 100:
+        return jsonify(code=400, msg="cids 须为非空数组（≤100 条）"), 400
+
+    rule = BATCH_ACTIONS[action]
+    updated: list[str] = []
+    skipped: list[dict] = []
+    for cid in cids[:100]:
+        c = _get_live_comment(str(cid))
+        if not c:
+            skipped.append({"comment_id": str(cid), "reason": "不存在"})
+            continue
+        if c.status not in rule["from"]:
+            skipped.append({"comment_id": c.comment_id, "reason": f"「{c.status}」状态不可{action}"})
+            continue
+        c.status = rule["to"]
+        c.updated_at = utcnow_str()
+        # payload 同步（评论 JSON 全量与列冗余一致）
+        c.payload_json = json.dumps({**json.loads(c.payload_json), "status": rule["to"]}, ensure_ascii=False)
+        c.save()
+        # 每条一个 COMMIT_STATUS 任务（每条一个 commit，git log 清晰）
+        enqueue_status(c.project, c.comment_id, rule["to"], session["name"], session["email"])
+        updated.append(c.comment_id)
+
+    return jsonify(code=0, data={
+        "action": action, "to": rule["to"],
+        "updated": updated, "skipped": skipped,
+    }), 200

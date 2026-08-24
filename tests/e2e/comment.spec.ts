@@ -523,3 +523,129 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.doc_excerpt).toContain('这段没有任何锚点标记')
   })
 })
+
+// ═══════════════════ T4.4 评论抽屉：批量确认 / 筛选 / 角标 ═══════════════════
+
+test.describe('T4.4 评论列表抽屉', () => {
+  test('批量确认：状态变更 + 落仓 JSON + git log（任务卡验收）', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 提交 2 条同锚点评论（login-account）+ 1 条另一锚点
+    const cids: string[] = []
+    for (const _ of [1, 2]) {
+      await page.getByTestId('comment-page-btn').isVisible() // 稳定 UI
+      const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+      await protoFrame.locator('[data-pa="login-account"]').click()
+      await expect(page.getByTestId('comment-box')).toBeVisible()
+      const data = await submitAndWait(page, `批量确认测试评论 ${cids.length + 1}`)
+      cids.push(data.comment_id)
+      await page.getByTestId('comment-done').click()
+    }
+    await Promise.all(cids.map((c) => waitForGitLog(cloneDirOf(page), `comment: ${c} 创建`)))
+
+    // 打开抽屉：分组 + 同位置合并角标 ×2
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await expect(page.getByTestId('comment-group-title')).toHaveText('index.html')
+    await expect(page.getByTestId('loc-count')).toHaveText('×2')
+
+    // 勾选 2 条（合并组需先展开）
+    await page.getByTestId('comment-loc').click() // 展开合并组
+    for (const c of cids) {
+      await page.getByTestId(`ck-${c}`).check()
+    }
+    // 批量确认
+    const respPromise = page.waitForResponse(
+      (r) => r.url().includes('/batch-status') && r.request().method() === 'POST',
+    )
+    await page.getByTestId('batch-confirm').click()
+    const resp = await respPromise
+    expect(resp.status()).toBe(200)
+    expect((await resp.json()).data.updated).toHaveLength(2)
+
+    // 状态 tag 变「已确认待修改」
+    for (const c of cids) {
+      await expect(page.locator(`[data-cid="${c}"] [data-testid="comment-status"]`)).toHaveText(
+        '已确认待修改',
+      )
+    }
+
+    // 落仓：JSON status 字段 + git log（轮询）
+    await Promise.all(
+      cids.map((c) => waitForGitLog(cloneDirOf(page), `comment: ${c} → 已确认待修改`)),
+    )
+    const clone = cloneDirOf(page)
+    for (const c of cids) {
+      const fj = JSON.parse(
+        fs.readFileSync(path.join(clone, 'reviews', 'comments', `${c}.json`), 'utf-8'),
+      )
+      expect(fj.status).toBe('已确认待修改')
+    }
+  })
+
+  test('筛选逻辑：宿主 + 状态', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 1 条原型评论 + 1 条文档评论
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d1 = await submitAndWait(page, '原型侧评论')
+    await page.getByTestId('comment-done').click()
+
+    const li = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    const box = (await li.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+    const d2 = await submitAndWait(page, '文档侧评论')
+    await page.getByTestId('comment-done').click()
+    await Promise.all([
+      waitForGitLog(cloneDirOf(page), `comment: ${d1.comment_id} 创建`),
+      waitForGitLog(cloneDirOf(page), `comment: ${d2.comment_id} 创建`),
+    ])
+
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+
+    // 宿主筛选：原型 → 只剩 index.html 组；文档 → 只剩 PRD 文档组
+    await page.getByTestId('filter-host').selectOption('proto')
+    await expect(page.getByTestId('comment-group-title')).toHaveText('index.html')
+    await expect(page.locator(`[data-cid="${d1.comment_id}"]`)).toBeVisible()
+    await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeHidden()
+
+    await page.getByTestId('filter-host').selectOption('doc')
+    await expect(page.getByTestId('comment-group-title')).toHaveText('PRD 文档')
+    await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeVisible()
+    await expect(page.locator(`[data-cid="${d1.comment_id}"]`)).toBeHidden()
+
+    // 状态筛选：待确认 → 2 条；已修改 → 空
+    await page.getByTestId('filter-host').selectOption('all')
+    await page.getByTestId('filter-status').selectOption('待确认')
+    await expect(page.getByTestId('comment-drawer').locator('.item')).toHaveCount(2)
+    await page.getByTestId('filter-status').selectOption('已修改')
+    await expect(page.getByTestId('comment-drawer').locator('.empty')).toBeVisible()
+  })
+
+  test('原型角标：提交后常显数量，点击打开抽屉', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 同锚点提交 2 条 → 角标 ×2
+    for (const i of [1, 2]) {
+      await protoFrame.locator('[data-pa="login-account"]').click()
+      await expect(page.getByTestId('comment-box')).toBeVisible()
+      await submitAndWait(page, `角标测试评论 ${i}`)
+      await page.getByTestId('comment-done').click()
+    }
+
+    const badge = protoFrame.locator('.pp-comment-badge')
+    await expect(badge).toBeVisible({ timeout: 10_000 })
+    await expect(badge).toHaveText('2')
+
+    // 点击角标 → 打开抽屉
+    await badge.click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await expect(page.getByTestId('loc-count')).toHaveText('×2')
+  })
+})

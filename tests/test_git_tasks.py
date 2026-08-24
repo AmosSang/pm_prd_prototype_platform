@@ -16,13 +16,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server.app import create_app  # noqa: E402
-from server.git_tasks import (  # noqa: E402
-    enqueue_delete,
-    enqueue_status,
-    wait_tasks,
-)
+from server.git_tasks import enqueue_delete, enqueue_status  # noqa: E402
 from server.models import Comment, GitTask, Project, db  # noqa: E402
-from tests.test_reviews import _dom_payload, _submit, make_anchor_remote  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    _git,
+    _wait_ok,
+    make_anchor_remote,  # noqa: E402
+)
+from tests.conftest import dom_payload as _dom_payload  # noqa: E402
+from tests.conftest import submit_comment as _submit  # noqa: E402
 
 
 @pytest.fixture()
@@ -59,17 +61,6 @@ def project(app, tmp_path):
 
 def _clone_root(app, p: Project) -> Path:
     return Path(app[1]) / p.project_id
-
-
-def _git(root: Path | str, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-
-def _wait_ok() -> None:
-    assert wait_tasks(timeout=20), "队列任务未在时限内完成"
 
 
 class TestQueueOrdering:
