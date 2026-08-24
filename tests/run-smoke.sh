@@ -48,10 +48,14 @@ server/.venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试�
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
 import shutil
-from server.models import VerificationCode, Project, init_tables
+from server.models import Comment, VerificationCode, Project, init_tables
 init_tables()
 n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
+# 清 T4.2 E2E 评论记录（外键引用 projects，删项目前须先清，否则
+# delete_instance 报 FOREIGN KEY constraint failed、项目残留同名卡片）
+nc = Comment.delete().execute()
+print(f'[smoke] 清理 e2e 评论记录 {nc} 条')
 # 清 T2.3/T2.4/T3.x E2E 绑定的项目记录与本地 clone（否则重复跑 smoke 卡片越积越多——
 # 残留同名卡片会让按名定位的用例 strict mode 冲突，也让「读首卡 slug」读到旧项目）
 from server.config import REPOS_DIR

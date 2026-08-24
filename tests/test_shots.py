@@ -2,6 +2,7 @@
 import io
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -65,3 +66,59 @@ def test_draw_border_no_rect():
     """无 rect 时返回原图。"""
     assert _draw_border(BASE, {}) == BASE
     assert _draw_border(BASE, None) == BASE
+
+
+# ───────────────────────── API 层（upload_shot）─────────────────────────
+
+import pytest  # noqa: E402
+
+from server.app import create_app  # noqa: E402
+from server.models import db  # noqa: E402
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    db.close()
+    db.init(str(tmp_path / "test.db"))
+    shots_dir = tmp_path / "shots"
+    monkeypatch.setattr("server.shots.SHOTS_DIR", str(shots_dir))
+    app = create_app()
+    app.config["TESTING"] = True
+    app.secret_key = "test-secret"
+    with app.test_client() as c:
+        with c.session_transaction() as sess:
+            sess["uid"] = 1
+        yield c, str(shots_dir)
+    db.close()
+
+
+def _upload(c, **fields):
+    from io import BytesIO
+
+    # 文件用 (stream, filename) 元组；文本字段直接放字符串（元组会被
+    # werkzeug 当文件流解析，request.form 取不到）
+    data = {"screenshot": (BytesIO(BASE), "s.png"), **fields}
+    return c.post("/api/projects/proj-x/shots", data=data, content_type="multipart/form-data")
+
+
+def test_upload_without_rect_ok(client):
+    """T4.2 页面评论：无红框（不传 highlight_rect）合法——无框截图。"""
+    c, shots_dir = client
+    resp = _upload(c, request_id="r1")
+    assert resp.status_code == 200, resp.get_json()
+    assert (Path(shots_dir) / "proj-x" / "r1.png").is_file()
+
+
+def test_upload_with_rect_ok(client):
+    c, shots_dir = client
+    resp = _upload(c, request_id="r2", highlight_rect='{"x": 10, "y": 5, "w": 30, "h": 20}')
+    assert resp.status_code == 200, resp.get_json()
+    # 红框画上了（左上角边线红色）
+    assert pixel((Path(shots_dir) / "proj-x" / "r2.png").read_bytes(), 10, 5) == RED
+
+
+def test_upload_bad_rect_rejected(client):
+    c, _ = client
+    assert _upload(c, request_id="r3", highlight_rect='{"x": -1}').status_code == 400
+    assert _upload(c, request_id="r4", highlight_rect="not-json").status_code == 400
+    assert _upload(c, request_id="r5", highlight_rect="null").status_code == 400

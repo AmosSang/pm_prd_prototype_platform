@@ -9,9 +9,14 @@ export class ApiError extends Error {
 }
 
 async function request<T = any>(url: string, init?: RequestInit): Promise<T> {
+  // FormData（文件上传）不能手动设 Content-Type——浏览器须自动生成
+  // multipart boundary，强设 application/json 会让后端解析不到文件
+  const isForm = init?.body instanceof FormData
   const res = await fetch(url, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    headers: isForm
+      ? { ...(init?.headers || {}) }
+      : { 'Content-Type': 'application/json', ...(init?.headers || {}) },
     ...init,
   })
   let body: any = null

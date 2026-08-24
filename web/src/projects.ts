@@ -96,3 +96,83 @@ export function getReconcile(id: number): Promise<ReconcileDetail> {
 export function syncProject(id: number): Promise<ProjectInfo> {
   return api.post<ProjectInfo>(`/api/projects/${id}/sync`)
 }
+
+// ───────────────────────── 评论（T4.2）─────────────────────────
+
+/** 评论 DOM 定位 payload（bridge 采集，技术方案 §2.3；schema 见 server/reviews.py） */
+export interface InteractionState {
+  modal_open: boolean
+  viewport: string
+  scroll_y: number
+  route: string
+}
+
+export interface CommentPayload {
+  target_type: 'dom' | 'page' | 'doc_block'
+  prototype_page: string
+  anchor_id: string
+  nearest_anchor_id: string
+  css_path: string
+  outer_html: string
+  text_excerpt: string
+  interaction_state: InteractionState
+  /** doc_block 评论专有（前端构造，服务端复核 + 补指纹） */
+  doc_anchor_id?: string
+  doc_excerpt?: string
+}
+
+export interface HighlightRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** 评论提交结果（POST /comments 响应：评论 JSON 全量 + git 状态） */
+export interface CreateCommentResult {
+  comment_id: string
+  author: string
+  status: string
+  priority: string
+  scope: string
+  content: string
+  created_at: string
+  target_type: 'dom' | 'page' | 'doc_block'
+  prototype_page?: string
+  anchor_id?: string
+  screenshot?: string
+  highlight_rect?: HighlightRect
+  doc_anchor_id?: string
+  doc_excerpt?: string
+  git_pushed: boolean
+  git_error: string | null
+}
+
+export function createComment(
+  id: number,
+  body: {
+    payload: CommentPayload
+    content: string
+    priority: string
+    scope: string
+    shot_id?: string
+    highlight_rect?: HighlightRect
+  },
+): Promise<CreateCommentResult> {
+  return api.post<CreateCommentResult>(`/api/projects/${id}/comments`, body)
+}
+
+/** 截图上传（T1.2 链路）：Blob → /shots 临时区，返回访问 URL（预览用）。
+ * slug 口径：临时区目录名与 /data/repos/{slug} 一致，评论提交时后端按 slug 取文件。 */
+export function uploadShot(
+  slug: string,
+  blob: Blob,
+  requestId: string,
+  highlightRect: HighlightRect | null,
+): Promise<{ shot_url: string }> {
+  const fd = new FormData()
+  fd.append('screenshot', blob, 'screenshot.png')
+  fd.append('request_id', requestId)
+  if (highlightRect) fd.append('highlight_rect', JSON.stringify(highlightRect))
+  return api.upload<{ shot_url: string }>(`/api/projects/${slug}/shots`, fd)
+}

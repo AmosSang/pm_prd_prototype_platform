@@ -15,7 +15,7 @@ import re
 import stat
 import tempfile
 
-from git import GitCommandError
+from git import Actor, GitCommandError
 from git import Repo as GitRepo
 
 from server.config import REPOS_DIR
@@ -150,5 +150,41 @@ def pull_project(project_id: str, encrypted_token: str, branch: str) -> None:
                 "本地与远端分叉，无法快进合并；请在仓库里手动处理后再同步", raw
             ) from e
         raise _classify_error(e, "pull") from e
+    finally:
+        _cleanup_askpass(script)
+
+
+def commit_and_push(
+    project_id: str,
+    encrypted_token: str,
+    branch: str,
+    message: str,
+    author_name: str,
+    author_email: str,
+) -> str | None:
+    """评论落仓（T4.2 同步版）：add reviews/ → commit（作者=评论人）→ push。
+
+    返回 None = 成功；否则返回错误描述（调用方置 sync_error，不阻塞评论——
+    DB 与文件已落，git 状态可后续修复）。T4.3 将把本调用改造为串行队列
+    任务（COMMIT_COMMENT 等 + push 冲突 pull --rebase 重试），本函数为
+    队列 worker 的执行单元。
+    """
+    dest = repo_path(project_id)
+    if not os.path.isdir(dest):
+        return f"本地 clone 不存在：{project_id}"
+
+    env, script = _askpass_env(decrypt_token(encrypted_token))
+    try:
+        repo = GitRepo(dest)
+        # 只 add reviews/ 子树——评论与截图是平台唯一写入口，防止误提交
+        # 工作区其他未知变更（如残留调试文件）
+        repo.git.add("reviews", env=env)
+        actor = Actor(author_name, author_email)
+        repo.index.commit(message, author=actor, committer=actor)
+        repo.git.push("origin", branch, env=env)
+        return None
+    except GitCommandError as e:
+        raw = ((e.stderr or "") + " " + (e.stdout or "")).strip()
+        return f"评论落仓失败：{raw[:300]}"
     finally:
         _cleanup_askpass(script)

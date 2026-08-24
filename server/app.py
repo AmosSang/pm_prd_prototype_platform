@@ -12,6 +12,7 @@ from server.auth import bp as auth_bp
 from server.models import init_tables
 from server.projects import bp as projects_bp
 from server.proto_proxy import bp as proto_proxy_bp
+from server.reviews import bp as reviews_bp
 from server.shots import bp as shots_bp
 
 
@@ -23,6 +24,7 @@ def create_app() -> Flask:
     app.register_blueprint(projects_bp)
     app.register_blueprint(proto_proxy_bp)
     app.register_blueprint(shots_bp)
+    app.register_blueprint(reviews_bp)
 
     init_tables()
 

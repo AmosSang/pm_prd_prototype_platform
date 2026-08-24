@@ -4,18 +4,25 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
+import { currentUser } from '../auth'
+import CommentBox from '../components/CommentBox.vue'
 import {
+  createComment,
   getOverview,
   getPrd,
   getReconcile,
   listProjects,
+  uploadShot,
+  type CommentPayload,
+  type CreateCommentResult,
+  type HighlightRect,
   type ProjectOverview,
   type ReconcileDetail,
 } from '../projects'
 
 /**
  * T2.4 分屏查看器骨架 + T3.1 锚点正向联动 + T3.2 反向联动 + T3.3 对账
- * + T4.1 评论模式采集。
+ * + T4.1 评论模式采集 + T4.2 评论框与提交链路。
  * 左：原型 iframe（:8081 独立 origin + sandbox + URL nonce，bridge.js 由代理注入）
  * 右：PRD markdown 渲染（markdown-it + 锚点插件，多文档 el-select 切换）
  * 中：可拖动分割条（pointer 事件，父级相对宽度）
@@ -28,27 +35,12 @@ import {
  * T3.3 对账：顶栏提示条（匹配 · 缺失 · 未描述），点击拉明细弹窗
  * （三态 + 重复 ID + 页面地图坏引用，数据来自服务端静态解析）。
  * T4.1 评论模式：顶栏开关 → SET_COMMENT_MODE；bridge 采集 ELEMENT_SELECTED
- * payload 在左侧底部面板展示（T4.2 将升级为评论框）。iframe 重载（切页）后
- * READY 时重发开关保持状态；ROUTE_CHANGE 更新 SPA 当前路由显示。
+ * payload。iframe 重载（切页）后 READY 时重发开关保持状态；ROUTE_CHANGE 更新
+ * SPA 当前路由显示。
+ * T4.2 评论框：三类入口（DOM 点击 / 「评论本页」COLLECT_PAGE / 文档段落
+ * 「评论」按钮）→ CommentBox 填写 → 提交时经 bridge 截图（先临时关模式清
+ * hover 蓝框）→ /shots 上传 → POST /comments（DB + reviews/ 落仓）。
  */
-
-/** 评论 DOM 定位 payload（bridge 采集，技术方案 §2.3；schema 见 server/reviews.py） */
-interface InteractionState {
-  modal_open: boolean
-  viewport: string
-  scroll_y: number
-  route: string
-}
-interface CommentPayload {
-  target_type: 'dom' | 'page' | 'doc_block'
-  prototype_page: string
-  anchor_id: string
-  nearest_anchor_id: string
-  css_path: string
-  outer_html: string
-  text_excerpt: string
-  interaction_state: InteractionState
-}
 
 const route = useRoute()
 const slug = route.params.slug as string
@@ -81,10 +73,23 @@ const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-esca
 const ready = ref(false)
 const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
 
-// ───────────────────────── T4.1 评论模式 ─────────────────────────
+// ───────────────────────── T4.1/T4.2 评论模式与评论框 ─────────────────────────
 const commentMode = ref(false)
 const capturedPayload = ref<CommentPayload | null>(null)
 const currentRoute = ref('') // ROUTE_CHANGE 上报的 SPA 当前路由（页面 + hash）
+
+// 评论框状态（T4.2）
+const submitting = ref(false)
+const submittedResult = ref<CreateCommentResult | null>(null)
+const submitError = ref('')
+const shotPreviewUrl = ref('') // 截图预览（临时区 URL；doc_block 无）
+
+/** 重置评论框到「填写中」（换目标 / 重新打开时）。 */
+function resetCommentBox() {
+  submittedResult.value = null
+  submitError.value = ''
+  shotPreviewUrl.value = ''
+}
 
 function postSetCommentMode(enabled: boolean) {
   // targetOrigin '*'：同 postHighlight 的沙箱约束（不透明 origin 为 "null"）
@@ -94,11 +99,114 @@ function postSetCommentMode(enabled: boolean) {
   )
 }
 
-/** 评论模式开关切换：同步 bridge + 清采集面板（新旧会话不混淆）。 */
+/** 评论模式开关切换：同步 bridge + 关评论框（新旧会话不混淆）。 */
 function onCommentModeChange(on: string | number | boolean) {
   commentMode.value = !!on
   capturedPayload.value = null
+  resetCommentBox()
   postSetCommentMode(!!on)
+}
+
+/** 关闭评论框（取消 / 完成按钮）。 */
+function closeCommentBox() {
+  capturedPayload.value = null
+  resetCommentBox()
+}
+
+/** 「评论本页」按钮（页面评论入口，产品方案 §4.5）：请求 bridge 采集
+ * 页面根 payload（COLLECT_PAGE → ELEMENT_SELECTED 统一入口弹评论框）。 */
+function commentPage() {
+  if (!commentMode.value || !ready.value) return
+  iframeEl.value?.contentWindow?.postMessage({ type: 'COLLECT_PAGE', nonce }, '*')
+}
+
+// ───────────────────────── 截图链路（T4.2，复用 T1.2）─────────────────
+// 提交时截图（非打开评论框时）：保证反映提交一刻状态（技术方案 §2.3）。
+// Promise 化：requestId 关联的 SCREENSHOT_RESULT / SCREENSHOT_ERROR；
+// 超时或失败返回 null（降级为无截图提交）。
+interface ScreenshotResult {
+  blob: Blob
+  highlight: HighlightRect | null
+}
+const screenshotWaiters = new Map<
+  string,
+  { resolve: (v: ScreenshotResult | null) => void }
+>()
+
+function takeScreenshot(
+  requestId: string,
+  cssPath: string | null,
+  timeoutMs = 30000,
+): Promise<ScreenshotResult | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      screenshotWaiters.delete(requestId)
+      resolve(null)
+    }, timeoutMs)
+    screenshotWaiters.set(requestId, {
+      resolve: (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+    })
+    iframeEl.value?.contentWindow?.postMessage(
+      { type: 'TAKE_SCREENSHOT', requestId, cssPath, nonce },
+      '*',
+    )
+  })
+}
+
+/** 提交评论：截图 → 上传 → POST /comments（DB + reviews/ 落仓）。 */
+async function submitComment(form: { content: string; priority: string; scope: string }) {
+  const payload = capturedPayload.value
+  if (!payload || !overview.value || submitting.value) return
+  submitting.value = true
+  submitError.value = ''
+  const isDoc = payload.target_type === 'doc_block'
+  let shotId = ''
+  let rect: HighlightRect | null = null
+  try {
+    if (!isDoc && ready.value) {
+      // 截图前临时关评论模式：清掉 hover 蓝框（否则被截进图），截完恢复。
+      // 开关 UI 状态不变（commentMode ref 不动，只动 bridge 侧）
+      postSetCommentMode(false)
+      const reqId = 'shot-' + Math.random().toString(36).slice(2, 10)
+      // page 评论红框=整页无意义，不传 cssPath（bridge 整页无框）；
+      // doc_block 评论不截图（目标是 PRD 段落，非原型）
+      const shot = await takeScreenshot(
+        reqId,
+        payload.target_type === 'page' ? null : payload.css_path,
+      )
+      if (shot) {
+        rect = shot.highlight
+        // 截图临时区目录口径 = project_id（slug，与 /data/repos 同名）——
+        // 提交时后端按 slug 找文件，两处必须一致（曾用数字主键导致 400）
+        await uploadShot(overview.value.project.project_id, shot.blob, reqId, shot.highlight)
+        shotId = reqId
+        shotPreviewUrl.value = `/api/shots/${overview.value.project.project_id}/${reqId}.png`
+      } else {
+        ElMessage.warning('截图生成失败，本条评论将不含截图')
+      }
+      if (commentMode.value) postSetCommentMode(true)
+    }
+    const res = await createComment(overview.value.project.id, {
+      payload,
+      content: form.content,
+      priority: form.priority,
+      scope: form.scope,
+      shot_id: shotId || undefined,
+      highlight_rect: rect || undefined,
+    })
+    submittedResult.value = res
+    if (!res.git_pushed) {
+      ElMessage.warning('评论已保存，但同步到仓库失败——请稍后在首页点「同步」重试')
+    }
+  } catch (e) {
+    submitError.value = e instanceof Error ? e.message : '提交失败，请重试'
+    if (!isDoc && commentMode.value) postSetCommentMode(true)
+  } finally {
+    submitting.value = false
+  }
 }
 
 function onMessage(event: MessageEvent) {
@@ -127,7 +235,28 @@ function onMessage(event: MessageEvent) {
     ElMessage.info(`锚点「${msg.anchorId}」在原型中缺失`)
   }
   if (msg.type === 'ELEMENT_SELECTED' && msg.payload) {
+    // 采集到目标（DOM 点击 / COLLECT_PAGE）：打开评论框。
+    // 填写中换目标 → 重置表单（CommentBox watch payload）
     capturedPayload.value = msg.payload as CommentPayload
+    resetCommentBox()
+  }
+  if (msg.type === 'SCREENSHOT_RESULT' && typeof msg.requestId === 'string') {
+    const w = screenshotWaiters.get(msg.requestId)
+    if (w) {
+      screenshotWaiters.delete(msg.requestId)
+      w.resolve(
+        msg.blob instanceof Blob
+          ? { blob: msg.blob, highlight: (msg.highlight as HighlightRect) || null }
+          : null,
+      )
+    }
+  }
+  if (msg.type === 'SCREENSHOT_ERROR' && typeof msg.requestId === 'string') {
+    const w = screenshotWaiters.get(msg.requestId)
+    if (w) {
+      screenshotWaiters.delete(msg.requestId)
+      w.resolve(null)
+    }
   }
   if (msg.type === 'ROUTE_CHANGE') {
     // route 含 hash（SPA 视角完整）；旧消息无 route 时退回 page
@@ -242,17 +371,47 @@ function onDocMouseout(e: MouseEvent) {
   host.classList.remove('pa-locate-hover')
 }
 
-/** 段落点击（委托）：点击落在「定位」按钮区域内（伪元素区域，坐标判断）
- * 才触发反向定位，点段落其他位置不误触。 */
+/** 段落点击（委托）：点击落在顶部按钮区（伪元素区域，坐标判断）才触发——
+ * 左上「定位」（T3.2，::before 在 left:8px 宽约 46px）或右上「评论」
+ * （T4.2，::after 在 right:8px，仅评论模式开时显示）；点段落其他位置不误触。 */
 function onDocClick(e: MouseEvent) {
   const host = (e.target as HTMLElement)?.closest?.('[data-pa]')
   if (!host || !host.classList.contains('pa-locate-hover')) return
-  // 「定位」按钮区域：段落顶部 28px 内（按钮在 top:-10px 高 20px）
+  // 顶部按钮区：段落顶部 28px 内（按钮在 top:-10px 高 20px）
   const rect = host.getBoundingClientRect()
-  if (e.clientY <= rect.top + 28) {
-    e.preventDefault()
-    const anchorId = host.getAttribute('data-pa')
-    if (anchorId) locateAnchor(anchorId)
+  if (e.clientY > rect.top + 28) return
+  e.preventDefault()
+  const anchorId = host.getAttribute('data-pa')
+  if (!anchorId) return
+  if (e.clientX <= rect.left + 60) {
+    // 左上「定位」
+    locateAnchor(anchorId)
+    return
+  }
+  if (commentMode.value && e.clientX >= rect.right - 64) {
+    // 右上「评论」：文档段落评论（doc_block，目标为该 PRD 块级元素）
+    openDocComment(host, anchorId)
+  }
+}
+
+/** 文档段落评论入口（T4.2）：构造 doc_block payload 打开评论框。
+ * 原型侧字段全空（无原型定位，schema 允许）；doc_excerpt 现采段落文本，
+ * 服务端用 doc_anchor_id 复核 PRD 锚点并补 fingerprint。 */
+function openDocComment(host: Element, anchorId: string) {
+  const text = (host.textContent || '').replace(/\s+/g, ' ').trim()
+  const excerpt = text.length > 200 ? text.slice(0, 200) + '…' : text
+  resetCommentBox()
+  capturedPayload.value = {
+    target_type: 'doc_block',
+    prototype_page: '',
+    anchor_id: '',
+    nearest_anchor_id: '',
+    css_path: '',
+    outer_html: '',
+    text_excerpt: excerpt,
+    interaction_state: { modal_open: false, viewport: '0x0', scroll_y: 0, route: '' },
+    doc_anchor_id: anchorId,
+    doc_excerpt: excerpt,
   }
 }
 
@@ -409,6 +568,16 @@ onBeforeUnmount(() => {
           >
             {{ currentRoute }}
           </span>
+          <!-- T4.2 页面评论入口（产品方案 §4.5「评论本页」） -->
+          <button
+            class="comment-page-btn"
+            :disabled="!commentMode || !ready"
+            :title="commentMode ? '对当前页面整体发表评论' : '开启评论模式后可用'"
+            data-testid="comment-page-btn"
+            @click="commentPage"
+          >
+            评论本页
+          </button>
           <span class="ready" :data-ready="ready">{{ ready ? '已就绪' : '加载中…' }}</span>
         </div>
         <iframe
@@ -419,37 +588,18 @@ onBeforeUnmount(() => {
           data-testid="viewer-proto-frame"
         />
         <p v-else class="empty">仓库内未发现 prototype/ 目录或 HTML 入口</p>
-        <!-- T4.1 评论模式采集结果面板（T4.2 将升级为评论框） -->
-        <div v-if="capturedPayload" class="capture-panel" data-testid="payload-panel">
-          <div class="cp-title">已采集评论定位信息</div>
-          <div class="cp-grid">
-            <span class="k">target_type</span>
-            <b data-testid="payload-target-type">{{ capturedPayload.target_type }}</b>
-            <span class="k">prototype_page</span>
-            <b data-testid="payload-page">{{ capturedPayload.prototype_page }}</b>
-            <span class="k">anchor_id</span>
-            <b data-testid="payload-anchor">{{ capturedPayload.anchor_id || '（无）' }}</b>
-            <span class="k">nearest_anchor_id</span>
-            <b data-testid="payload-nearest">{{ capturedPayload.nearest_anchor_id || '（无）' }}</b>
-            <span class="k">css_path</span>
-            <b class="mono" data-testid="payload-css-path">{{ capturedPayload.css_path }}</b>
-            <span class="k">text_excerpt</span>
-            <b data-testid="payload-text">{{ capturedPayload.text_excerpt || '（无文本）' }}</b>
-            <span class="k">modal_open</span>
-            <b data-testid="payload-modal-open">{{ capturedPayload.interaction_state.modal_open }}</b>
-            <span class="k">viewport</span>
-            <b data-testid="payload-viewport">{{ capturedPayload.interaction_state.viewport }}</b>
-            <span class="k">scroll_y</span>
-            <b data-testid="payload-scroll-y">{{ capturedPayload.interaction_state.scroll_y }}</b>
-            <span class="k">route</span>
-            <b class="mono" data-testid="payload-route">{{ capturedPayload.interaction_state.route }}</b>
-            <span class="k">outer_html</span>
-            <details class="cp-details">
-              <summary>展开（目标 + 祖先上下文）</summary>
-              <code data-testid="payload-outer-html">{{ capturedPayload.outer_html }}</code>
-            </details>
-          </div>
-        </div>
+        <!-- T4.2 评论框（三类入口共用：DOM 点击 / 评论本页 / 文档段落） -->
+        <CommentBox
+          v-if="capturedPayload"
+          :payload="capturedPayload"
+          :author="currentUser?.name || ''"
+          :submitting="submitting"
+          :result="submittedResult"
+          :shot-preview-url="shotPreviewUrl || null"
+          :error="submitError"
+          @submit="submitComment"
+          @close="closeCommentBox"
+        />
       </section>
 
       <!-- 分割条 -->
@@ -483,6 +633,7 @@ onBeforeUnmount(() => {
         </div>
         <div
           class="prd-scroll"
+          :class="{ 'comment-on': commentMode }"
           @mouseover="onDocMouseover"
           @mouseout="onDocMouseout"
           @click="onDocClick"
@@ -738,40 +889,24 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-/* T4.1 采集结果面板（左侧底部；T4.2 升级为评论框后移除） */
-.capture-panel {
-  flex-shrink: 0;
-  border-top: 1px solid #e6e8ec;
-  background: #fbfcfe;
-  max-height: 180px;
-  overflow-y: auto;
-  padding: 8px 12px;
+/* T4.2「评论本页」按钮（页面评论入口） */
+.pane-head .comment-page-btn {
+  border: 1px solid #d9dce1;
+  border-radius: 4px;
+  background: #fff;
+  padding: 2px 10px;
   font-size: 12px;
+  color: #57606a;
+  cursor: pointer;
+  white-space: nowrap;
 }
-.capture-panel .cp-title {
+.pane-head .comment-page-btn:hover:not(:disabled) {
+  border-color: #2b5cff;
   color: #2b5cff;
-  margin-bottom: 6px;
 }
-.capture-panel .cp-grid {
-  display: grid;
-  grid-template-columns: 132px 1fr;
-  gap: 3px 10px;
-  align-items: baseline;
-}
-.capture-panel .k { color: #999; }
-.capture-panel b { font-weight: 500; color: #24292f; word-break: break-all; }
-.capture-panel .mono,
-.capture-panel .cp-details code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-}
-.capture-panel .cp-details { margin: 0; }
-.capture-panel .cp-details summary { cursor: pointer; color: #2b5cff; }
-.capture-panel .cp-details code {
-  display: block;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin-top: 4px;
+.pane-head .comment-page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .divider {
@@ -833,7 +968,7 @@ onBeforeUnmount(() => {
   transition: background 0.3s ease;
 }
 
-/* T3.2 反向联动「定位」按钮：[data-pa] 元素 hover 时右上角浮现。
+/* T3.2 反向联动「定位」按钮：[data-pa] 元素 hover 时左上角浮现。
    伪元素实现（v-html 渲染的 markdown 不能插组件），点击走事件委托。 */
 .markdown-body :deep([data-pa]) {
   position: relative;
@@ -859,6 +994,30 @@ onBeforeUnmount(() => {
 }
 /* 伪元素点击 → 宿主是 [data-pa]（e.target 是宿主元素本体，
    closest('.pa-locate-btn') 匹配不到，改由 closest('[data-pa]') 命中） */
+
+/* T4.2 文档段落「评论」按钮：评论模式开时 hover 浮现于右上角（::after，
+   与左上「定位」::before 对称）。点击区域判定见 onDocClick。 */
+.prd-scroll.comment-on :deep(.pa-locate-hover)::after {
+  content: '评论';
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  z-index: 10;
+  padding: 0 7px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid #2b5cff;
+  color: #2b5cff;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  user-select: none;
+}
+.prd-scroll.comment-on :deep(.pa-locate-hover:hover)::after {
+  background: #2b5cff;
+  color: #fff;
+}
 
 .loading { align-items: center; justify-content: center; }
 </style>

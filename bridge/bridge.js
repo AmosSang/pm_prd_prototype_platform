@@ -11,6 +11,7 @@
  *        （stopPropagation/preventDefault）+ payload 一次性采集（ELEMENT_SELECTED，
  *        字段表见技术方案 §2.3）+ ROUTE_CHANGE（SPA 路由切换上报：
  *        pushState/replaceState monkey-patch + hashchange/popstate）
+ * T4.2：COLLECT_PAGE——「评论本页」按钮触发页面根（body）payload 采集
  *
  * 认证机制：sandbox（无 allow-same-origin）下 iframe origin 为不透明 "null"，
  * 无法按 origin 校验。采用 URL nonce：宿主在 iframe src 的 hash 中携带随机
@@ -696,6 +697,11 @@
       send('ECHO', { echo: 'pong-' + msg.nonce, page: window.location.pathname })
     } else if (msg.type === 'SET_COMMENT_MODE') {
       setCommentMode(!!msg.enabled)
+    } else if (msg.type === 'COLLECT_PAGE') {
+      // T4.2「评论本页」按钮：宿主请求采集页面根（body）payload——
+      // 页面评论目标为页面根元素（产品方案 §4.5），走 ELEMENT_SELECTED
+      // 统一入口，宿主收到后弹评论框
+      send('ELEMENT_SELECTED', { payload: collectPayload(document.body) })
     } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
       // 反向联动（T3.2）：false 表示本页没有该锚点（正常不会发生——
       // 宿主已按页面地图切页；万一落空回 ACK 让宿主 toast 提示）

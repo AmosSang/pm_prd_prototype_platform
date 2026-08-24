@@ -36,18 +36,21 @@ def upload_shot(project_id: str):
     if not REQUEST_ID.fullmatch(req_id):
         return jsonify(code=1, msg="非法 request_id"), 400
 
-    # highlight_rect（JSON 字符串，四字段均为非负整数）
-    rect = {}
+    # highlight_rect（JSON 字符串，四字段均为非负整数）。缺省合法——
+    # T4.2 页面评论截图无红框（目标=页面根，框红无意义），不传该字段
+    rect: dict = {}
     try:
         import json
 
         raw = request.form.get("highlight_rect")
         if raw:
             rect = json.loads(raw)
-        for k in ("x", "y", "w", "h"):
-            rect[k] = int(rect.get(k, -1))
-            if rect[k] < 0:
+            if not isinstance(rect, dict):
                 raise ValueError
+            for k in ("x", "y", "w", "h"):
+                rect[k] = int(rect.get(k, -1))
+                if rect[k] < 0:
+                    raise ValueError
     except (ValueError, TypeError):
         return jsonify(code=1, msg="highlight_rect 格式非法"), 400
 

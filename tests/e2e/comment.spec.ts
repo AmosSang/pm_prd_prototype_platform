@@ -5,14 +5,18 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * T4.1 评论模式元素采集 E2E。
+ * T4.1 评论模式元素采集 + T4.2 评论框提交链路 E2E。
  *
- * 验收点（任务卡）：开启评论模式点元素，采到的 payload 断言字段齐全。
+ * T4.1 验收点（任务卡）：开启评论模式点元素，采到的 payload 断言字段齐全。
  * 场景：开启评论模式 → hover 蓝色高亮 → click 捕获拦截 → ELEMENT_SELECTED
- * payload 面板字段断言（target_type / prototype_page / anchor_id /
+ * payload 在评论框目标摘要区断言（target_type / prototype_page / anchor_id /
  * nearest_anchor_id / css_path / outer_html / text_excerpt / interaction_state）。
  * 另含：非锚点与页面根目标、点击拦截（原型行为不触发）、modal_open 检测、
  * 开关关闭、切页后模式保持（READY 重发）、ROUTE_CHANGE 上报。
+ *
+ * T4.2 验收点（任务卡）：三类评论各提交一条，DB 与 reviews/ 文件均出现。
+ * DB 由 POST /comments 响应代表（API 事务性，落库失败必 4xx/5xx）；
+ * reviews/ 文件直接读本地 clone 断言（JSON 字段 + 截图 PNG + git log）。
  */
 
 const REPO_DIR = path.join(os.tmpdir(), 'ppp-e2e-comment-repo')
@@ -187,7 +191,7 @@ test.describe('T4.1 评论模式元素采集', () => {
 
     // 点击采集 → 宿主面板出现，逐字段断言
     await account.click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-target-type')).toHaveText('dom')
     await expect(page.getByTestId('payload-page')).toHaveText('index.html')
     await expect(page.getByTestId('payload-anchor')).toHaveText('login-account')
@@ -218,7 +222,7 @@ test.describe('T4.1 评论模式元素采集', () => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
     await protoFrame.locator('h2').first().click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-target-type')).toHaveText('dom')
     await expect(page.getByTestId('payload-anchor')).toHaveText('（无）')
     await expect(page.getByTestId('payload-nearest')).toHaveText('page-login')
@@ -230,7 +234,7 @@ test.describe('T4.1 评论模式元素采集', () => {
     await enableCommentMode(page)
     // body padding 区（fixture 设 24px 边距）落点是 body 本身
     await protoFrame.locator('body').click({ position: { x: 5, y: 5 } })
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-target-type')).toHaveText('page')
     await expect(page.getByTestId('payload-page')).toHaveText('index.html')
     await expect(page.getByTestId('payload-css-path')).toHaveText('body')
@@ -246,7 +250,7 @@ test.describe('T4.1 评论模式元素采集', () => {
     // 实验组：模式开启后点击 → 拦截（不新增标记）+ 采集正常
     await enableCommentMode(page)
     await protoFrame.locator('#submit-btn').click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-nearest')).toHaveText('login-form')
     await expect(protoFrame.locator('#submit-marker')).toHaveCount(1)
   })
@@ -265,7 +269,7 @@ test.describe('T4.1 评论模式元素采集', () => {
     // 开启评论模式后点弹窗内按钮 → modal_open=true 且拦截（弹窗不关闭）
     await enableCommentMode(page)
     await protoFrame.locator('[data-pa="deregister-cancel"]').click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-modal-open')).toHaveText('true')
     await expect(page.getByTestId('payload-anchor')).toHaveText('deregister-cancel')
     await expect(page.getByTestId('payload-page')).toHaveText('pages/modal.html')
@@ -276,14 +280,14 @@ test.describe('T4.1 评论模式元素采集', () => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
     await protoFrame.locator('[data-pa="login-account"]').click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
 
     await disableCommentMode(page)
     // 开关关闭即清面板
-    await expect(page.getByTestId('payload-panel')).toBeHidden()
+    await expect(page.getByTestId('comment-box')).toBeHidden()
     // 点击不再采集（面板不重现）
     await protoFrame.locator('[data-pa="login-captcha"]').click()
-    await expect(page.getByTestId('payload-panel')).toBeHidden()
+    await expect(page.getByTestId('comment-box')).toBeHidden()
   })
 
   test('切页后评论模式保持（READY 重发开关）', async ({ page }) => {
@@ -295,7 +299,7 @@ test.describe('T4.1 评论模式元素采集', () => {
     // iframe 重载后 bridge 状态归零，宿主 READY 时重发 SET_COMMENT_MODE
     await expect(protoFrame.locator('html')).toHaveClass(/pp-comment-mode/, { timeout: 5_000 })
     await protoFrame.locator('[data-pa="settings-profile-edit"]').click()
-    await expect(page.getByTestId('payload-panel')).toBeVisible()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
     await expect(page.getByTestId('payload-page')).toHaveText('pages/modal.html')
     await expect(page.getByTestId('payload-anchor')).toHaveText('settings-profile-edit')
   })
@@ -309,5 +313,151 @@ test.describe('T4.1 评论模式元素采集', () => {
       window.location.hash = '#/spa-view'
     })
     await expect(page.getByTestId('current-page')).toHaveText('index.html#/spa-view')
+  })
+})
+
+// ═══════════════════ T4.2 评论框提交链路（三类评论）═══════════════════
+
+/** 从当前 URL 提取项目 slug（clone 目录名 = /data/repos/{slug}）。 */
+function slugOf(page: Page): string {
+  return page.url().match(/\/project\/([a-z0-9-]+)/)![1]
+}
+
+/** 本地 clone 根目录（Playwright 进程 cwd = tests/）。 */
+function cloneDirOf(page: Page): string {
+  return path.resolve(process.cwd(), '..', 'data', 'repos', slugOf(page))
+}
+
+/** 提交评论并等 POST /comments 响应，返回响应 data（含 comment_id）。 */
+async function submitAndWait(page: Page, content: string): Promise<Record<string, any>> {
+  await page.getByTestId('comment-content').fill(content)
+  const respPromise = page.waitForResponse(
+    (r) => r.url().includes('/comments') && r.request().method() === 'POST',
+  )
+  await page.getByTestId('comment-submit').click()
+  const resp = await respPromise
+  expect(resp.status()).toBe(200)
+  const body = await resp.json()
+  expect(body.code).toBe(0)
+  return body.data
+}
+
+test.describe('T4.2 评论提交链路', () => {
+  test('DOM 评论全链路：截图 + 成功态 + reviews/ 文件 + git commit/push', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 点锚点元素 → 评论框 → 填写提交（P1）
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+    await page.getByTestId('comment-priority').selectOption('P1')
+    const data = await submitAndWait(page, '验证码发送后按钮要进入 60s 倒计时禁用态')
+    const cid: string = data.comment_id
+    expect(cid).toMatch(/^c-\d{8}-\d{3}$/)
+    expect(data.git_pushed).toBe(true)
+    expect(data.status).toBe('待确认')
+    expect(data.author).toBe('E2E测试员')
+
+    // 成功态：comment_id 回显 + 截图预览（提交时自动生成，可查看不可编辑）
+    await expect(page.getByTestId('submitted-cid')).toHaveText(cid)
+    await expect(page.getByTestId('shot-preview')).toBeVisible()
+
+    // reviews/ 评论 JSON（事实源）：payload 原样落 + doc 锚点匹配 + 截图引用
+    const clone = cloneDirOf(page)
+    const fj = JSON.parse(
+      fs.readFileSync(path.join(clone, 'reviews', 'comments', `${cid}.json`), 'utf-8'),
+    )
+    expect(fj.comment_id).toBe(cid)
+    expect(fj.status).toBe('待确认')
+    expect(fj.author).toBe('E2E测试员')
+    expect(fj.priority).toBe('P1')
+    expect(fj.scope).toBe('prototype')
+    expect(fj.content).toContain('倒计时禁用态')
+    expect(fj.target_type).toBe('dom')
+    expect(fj.anchor_id).toBe('login-account')
+    expect(fj.nearest_anchor_id).toBe('login-form')
+    expect(fj.interaction_state.viewport).toMatch(/^\d+x\d+$/)
+    // doc 匹配：候选锚点 login-account 命中 PRD 锚点（E2E 播种用户名「E2E测试员」）
+    expect(fj.doc_anchor_id).toBe('login-account')
+    expect(fj.doc_excerpt).toContain('账号输入')
+    // 截图：文件引用与 PNG 落盘 + 红框坐标
+    expect(fj.screenshot).toBe(`shots/${cid}.png`)
+    expect(fs.existsSync(path.join(clone, 'reviews', 'shots', `${cid}.png`))).toBe(true)
+    expect(fj.highlight_rect).toBeTruthy()
+    expect(fj.highlight_rect.w).toBeGreaterThan(0)
+
+    // git：本地 clone 与远端裸仓库（push 生效）最新 commit
+    const msg = execSync(`git -C "${clone}" log -1 --format=%s`).toString().trim()
+    expect(msg).toBe(`comment: ${cid} 创建`)
+    const remoteMsg = execSync(`git -C "${REPO_DIR}" log -1 --format=%s`).toString().trim()
+    expect(remoteMsg).toBe(`comment: ${cid} 创建`)
+
+    // 完成按钮关闭评论框
+    await page.getByTestId('comment-done').click()
+    await expect(page.getByTestId('comment-box')).toBeHidden()
+  })
+
+  test('页面评论：「评论本页」按钮 → target_type=page + 截图无红框', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    await page.getByTestId('comment-page-btn').click()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+    await expect(page.getByTestId('payload-target-type')).toHaveText('page')
+    await expect(page.getByTestId('payload-page')).toHaveText('index.html')
+    await expect(page.getByTestId('payload-css-path')).toHaveText('body')
+
+    const data = await submitAndWait(page, '本页首屏加载偏慢，需要骨架屏')
+    const cid: string = data.comment_id
+    expect(data.git_pushed).toBe(true)
+
+    const fj = JSON.parse(
+      fs.readFileSync(
+        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
+        'utf-8',
+      ),
+    )
+    expect(fj.target_type).toBe('page')
+    expect(fj.css_path).toBe('body')
+    // 页面评论有整页截图但不框红（目标=页面根，框红无意义）
+    expect(fj.screenshot).toBe(`shots/${cid}.png`)
+    expect(fj.highlight_rect).toBeNull()
+  })
+
+  test('文档段落评论：doc_block + fingerprint + 无截图', async ({ page }) => {
+    await openViewer(page)
+    await enableCommentMode(page)
+
+    // 文档段落 hover「评论」按钮（::after 右上角，坐标点击——伪元素非事件 target）
+    const li = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    await li.waitFor()
+    const box = (await li.boundingBox())!
+    // 先 hover 段落触发 pa-locate-hover（mouseover 委托加 class），再点右上区
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+    await expect(page.getByTestId('payload-target-type')).toHaveText('doc_block')
+    await expect(page.getByTestId('payload-anchor')).toHaveText('login-account')
+
+    const data = await submitAndWait(page, '账号输入需要补充支持邮箱登录的说明')
+    const cid: string = data.comment_id
+    expect(data.git_pushed).toBe(true)
+
+    const fj = JSON.parse(
+      fs.readFileSync(
+        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
+        'utf-8',
+      ),
+    )
+    expect(fj.target_type).toBe('doc_block')
+    expect(fj.doc_anchor_id).toBe('login-account')
+    expect(fj.doc_excerpt).toContain('账号输入')
+    // fingerprint：标题路径 + 段落文本 sha1 前 16 位（hex）
+    expect(fj.doc_block_fingerprint).toMatch(/^[0-9a-f]{16}$/)
+    // scope 默认按宿主推断：文档评论 → doc
+    expect(fj.scope).toBe('doc')
+    // 文档评论无截图（目标是 PRD 段落，非原型）
+    expect(fj.screenshot).toBeUndefined()
   })
 })
