@@ -391,6 +391,46 @@ class TestUploadAPI:
         # 临时目录不残留
         assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
 
+    def test_upload_prototype_macos_finder_zip(self, app):
+        """用户报障场景：macOS Finder 压缩的 zip 带 __MACOSX/ 资源目录、
+        .DS_Store 与 ._ 资源 fork 垃圾条目——不得干扰「唯一内容子目录」
+        判断，且垃圾不落进项目目录。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "Mac压缩项目")
+
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "prototype/": "",                                # 目录条目
+                "prototype/index.html": "<html><body>hi</body></html>",
+                "prototype/.DS_Store": "junk",
+                "__MACOSX/": "",
+                "__MACOSX/prototype/": "",
+                "__MACOSX/prototype/._index.html": "resource-fork junk",
+                ".DS_Store": "junk",
+            })), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        # 下钻 prototype/ 壳成功（垃圾条目被忽略，内容子目录唯一）
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+        # 垃圾条目不落盘
+        assert not os.path.exists(os.path.join(root, "prototype", "__MACOSX"))
+        assert not os.path.exists(os.path.join(root, "prototype", ".DS_Store"))
+        assert not os.path.exists(os.path.join(root, "prototype", "._index.html"))
+
+    def test_upload_prototype_ignores_dotdir_for_descend(self, app):
+        """下钻的「唯一子目录」按可见内容目录计：.git 等点开头目录不参与计数。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "点目录项目")
+
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "prototype/index.html": "<html><body>hi</body></html>",
+                ".git/config": "[core]",
+            })), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+
     def test_upload_prototype_no_html_rejected(self, app):
         """T8.2：根与唯一一级子目录均无 html → 400（原型必含页面）。"""
         client, projects_dir = app
