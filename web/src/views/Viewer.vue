@@ -78,6 +78,57 @@ const sandboxAttr = 'allow-scripts allow-same-origin allow-forms allow-popups al
 const ready = ref(false)
 const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
 
+// ── READY 看门狗 ─────────────────────────────────────────────────────────
+// 「已就绪」由 bridge 在原型页 window.load 后上报 READY 置位。若 bridge.js 因
+// 外部原因未加载/未上报（Nginx 未代理 /bridge.js、浏览器缓存拿到旧文档、消息
+// 偶发被吞等），界面会永远停在「加载中…」且锚点定位整链失效、刷新也不能恢复。
+// 方案：超时自动强制重载 iframe 重新握手（有上限）；仍失败则给「连接异常，点击
+// 重试」替代「加载中…」，避免静默卡死。
+const READY_TIMEOUT_MS = 8000
+const READY_MAX_RETRIES = 3
+const frameKey = ref(0) // 递增以强制 iframe 重挂载（重载 bridge）
+const readyStuck = ref(false)
+let readyTimer: ReturnType<typeof setTimeout> | null = null
+let readyRetries = 0
+
+function disarmReadyWatchdog() {
+  if (readyTimer) {
+    clearTimeout(readyTimer)
+    readyTimer = null
+  }
+}
+
+function armReadyWatchdog() {
+  disarmReadyWatchdog()
+  ready.value = false
+  readyTimer = setTimeout(onReadyTimeout, READY_TIMEOUT_MS)
+}
+
+function onReadyTimeout() {
+  if (ready.value) return
+  if (readyRetries >= READY_MAX_RETRIES) {
+    readyStuck.value = true // 交给「点击重试」手动恢复
+    return
+  }
+  readyRetries++
+  frameKey.value++ // 强制重载 iframe → bridge 重新上报 READY
+  armReadyWatchdog()
+}
+
+/** 手动重试：重置看门狗并重载 iframe。 */
+function retryReady() {
+  readyStuck.value = false
+  readyRetries = 0
+  frameKey.value++
+  armReadyWatchdog()
+}
+
+// 切页/改入口 = iframe 重载 → 重新握手；READY 到达后解除看门狗
+watch(currentEntry, () => armReadyWatchdog())
+watch(ready, (r) => {
+  if (r) disarmReadyWatchdog()
+})
+
 // ───────────────────────── T4.5 项目级「可评论」开关 ─────────────────────────
 // 产品方案 §4.5：默认开启；关闭后全员评论入口置灰（已有评论仍可查看——
 // 抽屉/角标不受影响）。PM 驱动 Agent 修改前关闭、同步刷新后再开启，
@@ -845,6 +896,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('message', onMessage)
   if (highlightTimer) clearTimeout(highlightTimer)
+  disarmReadyWatchdog()
 })
 </script>
 
@@ -968,10 +1020,14 @@ onBeforeUnmount(() => {
           >
             评论本页
           </button>
-          <span class="ready" :data-ready="ready">{{ ready ? '已就绪' : '加载中…' }}</span>
+          <span v-if="readyStuck" class="ready ready-stuck" data-testid="ready-retry" title="bridge 握手失败，点击重试" @click="retryReady">
+            连接异常，已重试多次，点击重试
+          </span>
+          <span v-else class="ready" :data-ready="ready">{{ ready ? '已就绪' : '加载中…' }}</span>
         </div>
         <iframe
           v-if="iframeSrc"
+          :key="frameKey"
           ref="iframeEl"
           :src="iframeSrc"
           :sandbox="sandboxAttr"
@@ -1314,8 +1370,9 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: #666;
 }
-.pane-head .ready { margin-left: auto; color: #999; font-size: 12px; }
+.pane-head .ready { margin-left: auto; color: #999; font-size: 12px; cursor: default; }
 .pane-head .ready[data-ready="true"] { color: #2e9e44; }
+.pane-head .ready.ready-stuck { color: #d33; cursor: pointer; text-decoration: underline; }
 .pane-head .doc-name { color: #999; font-size: 12px; margin-left: auto; }
 .pane-head .anchor-count { color: #b8860b; font-size: 12px; margin-left: 8px; }
 
