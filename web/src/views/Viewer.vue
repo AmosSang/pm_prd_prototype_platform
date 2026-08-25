@@ -466,7 +466,7 @@ const docBadgeEl = ref<HTMLElement | null>(null)
 
 /** hover 段落时更新文档角标（在 onDocMouseover 里调用）。 */
 function updateDocBadge(host: Element) {
-  const anchorId = host.getAttribute('data-pa') || ''
+  const anchorId = firstAnchorOf(host) // 多锚点区块取第一个锚点归属角标
   const key = 'doc|' + currentDoc.value + '|' + (anchorId || headingPathOf(host))
   const n = comments.value.filter(
     (c) => c.target_type === 'doc_block' && docLocKeyOf(c) === key,
@@ -518,10 +518,16 @@ function syncBadges() {
 // HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
 let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
-/** 文档容器内查锚点元素（当前已渲染的文档）。 */
+/** 文档容器内查锚点元素（当前已渲染的文档）。data-pa 可能为多锚点（空格分隔），
+ * 用 `~=` 做单词匹配：单锚点与多锚点都能命中。 */
 function findDocAnchor(anchorId: string): HTMLElement | null {
   const container = document.querySelector<HTMLElement>('[data-testid="prd-content"]')
-  return container?.querySelector<HTMLElement>(`[data-pa="${cssEscape(anchorId)}"]`) || null
+  return container?.querySelector<HTMLElement>(`[data-pa~="${cssEscape(anchorId)}"]`) || null
+}
+
+/** 取块级宿主上的「第一个」锚点 ID（data-pa 空格分隔多个；单锚点即其本身）。 */
+function firstAnchorOf(host: Element): string {
+  return (host.getAttribute('data-pa') || '').split(/\s+/).filter(Boolean)[0] || ''
 }
 
 /** 正向联动：滚动 + 高亮当前文档的锚点元素。 */
@@ -638,6 +644,19 @@ function onDocMouseout(e: MouseEvent) {
  * 左上「定位」（T3.2，::before 在 left:8px，仅 [data-pa] 宿主）或右上
  * 「评论」（T4.2，::after 在 right:8px，任意块级宿主、评论模式开时）；
  * 点段落其他位置不误触。 */
+/** T 增强：多锚点区块点击「定位」→ 弹出锚点 ID 列表供选择（按宿主位置固定浮层）。 */
+const anchorMenu = ref({ visible: false, x: 0, y: 0, ids: [] as string[] })
+
+function openAnchorMenu(host: Element, ids: string[]) {
+  const rect = host.getBoundingClientRect()
+  anchorMenu.value = { visible: true, x: rect.left, y: rect.top, ids }
+}
+
+function pickAnchor(id: string) {
+  anchorMenu.value.visible = false
+  locateAnchor(id)
+}
+
 function onDocClick(e: MouseEvent) {
   const host = docHostOf(e.target)
   if (!host || !host.classList.contains('pa-locate-hover')) return
@@ -645,10 +664,14 @@ function onDocClick(e: MouseEvent) {
   const rect = host.getBoundingClientRect()
   if (e.clientY > rect.top + 28) return
   e.preventDefault()
-  const anchorId = host.getAttribute('data-pa')
+  const anchorIds = (host.getAttribute('data-pa') || '').split(/\s+/).filter(Boolean)
   if (e.clientX <= rect.left + 60) {
     // 左上「定位」（仅锚点宿主；无锚点不显示该按钮，点了也不响应）
-    if (anchorId) locateAnchor(anchorId)
+    if (anchorIds.length > 1) {
+      openAnchorMenu(host, anchorIds)
+      return
+    }
+    if (anchorIds.length === 1) locateAnchor(anchorIds[0])
     return
   }
   if (commentMode.value && e.clientX >= rect.right - 64) {
@@ -687,7 +710,7 @@ function headingPathOf(host: Element): string {
  * （服务端复核 PRD 锚点）；无锚点段落 doc_anchor_id 空、doc_excerpt +
  * doc_path（标题路径）现采——服务端据此算内容指纹定位段落。 */
 function openDocComment(host: Element) {
-  const anchorId = host.getAttribute('data-pa') || ''
+  const anchorId = firstAnchorOf(host) // 多锚点区块取第一个锚点
   const text = (host.textContent || '').replace(/\s+/g, ' ').trim()
   const excerpt = text.length > 200 ? text.slice(0, 200) + '…' : text
   resetCommentBox()
@@ -1024,6 +1047,33 @@ onBeforeUnmount(() => {
             {{ docBadge.count > 99 ? '99+' : docBadge.count }}
           </div>
         </div>
+        <!-- T 增强：多锚点区块点击「定位」→ 弹出锚点 ID 列表供选择 -->
+        <Teleport to="body">
+          <div
+            v-if="anchorMenu.visible"
+            class="anchor-menu-backdrop"
+            data-testid="anchor-menu-backdrop"
+            @click="anchorMenu.visible = false"
+          />
+          <div
+            v-if="anchorMenu.visible"
+            class="anchor-menu"
+            :style="{ left: anchorMenu.x + 'px', top: anchorMenu.y + 'px' }"
+            data-testid="anchor-menu"
+          >
+            <div class="anchor-menu-title">选择锚点</div>
+            <button
+              v-for="id in anchorMenu.ids"
+              :key="id"
+              type="button"
+              class="anchor-menu-item"
+              :data-testid="`anchor-pick-${id}`"
+              @click="pickAnchor(id)"
+            >
+              {{ id }}
+            </button>
+          </div>
+        </Teleport>
       </section>
 
       <!-- 分割条（文档 | 评论，抽屉打开才显示） -->
@@ -1412,6 +1462,49 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px #ffd66e;
   border-radius: 4px;
   transition: background 0.3s ease;
+}
+
+/* T 增强：多锚点列表弹窗（点击「定位」后浮出，选则定位到对应锚点） */
+.anchor-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+}
+.anchor-menu {
+  position: fixed;
+  z-index: 3001;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 6px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+  font-size: 12px;
+  transform: translateY(10px);
+}
+.anchor-menu-title {
+  padding: 4px 8px;
+  color: #909399;
+  border-bottom: 1px solid #f0f2f5;
+  margin-bottom: 4px;
+}
+.anchor-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  margin: 2px 0;
+  text-align: left;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #2b5cff;
+  font-size: 12px;
+  cursor: pointer;
+  word-break: break-all;
+}
+.anchor-menu-item:hover {
+  background: #f0f5ff;
 }
 
 /* T3.2 反向联动「定位」按钮：[data-pa] 元素 hover 时左上角浮现。

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { createProjectWithContent, uploadPrd, type ProjectInfo } from './helpers'
 
 /**
@@ -231,5 +231,112 @@ test.describe('T8.1 内容更新（上传替换）', () => {
     await expect(page.locator('.doc-name')).toHaveText('prd/新需求.md', { timeout: 10_000 })
     // 内容渲染为新文档（旧文档「初始文档」已替换）
     await expect(page.getByTestId('prd-content').locator('h1')).toHaveText('远端新文档')
+  })
+})
+
+/** 打开分屏查看器并等待 PRD 渲染出 waitSel 元素（独立项目；PRD 异步渲染）。 */
+async function openViewer(page: Page, proj: ProjectInfo, waitSel: string) {
+  await page.goto('/')
+  await page
+    .locator('.card')
+    .filter({ hasText: proj.project_id })
+    .getByTestId('open-project')
+    .click()
+  await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
+  await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('prd-content').locator(waitSel)).toBeVisible({ timeout: 10_000 })
+}
+
+test.describe('T 增强 独立锚点归并前段', () => {
+  test('独立注释行 → 挂前一「段落/标题」而非下一段', async ({ page, request }) => {
+    const proj = await createProjectWithContent(request, `独锚-${Date.now().toString(36)}`, {
+      protoFiles: {
+        'index.html': `<!DOCTYPE html><html><body>
+  <main data-pa="page-login">登录页</main>
+  <main data-pa="page-home" style="margin-top:200vh">首页</main>
+</body></html>`,
+      },
+      prdFile: {
+        name: '需求.md',
+        content: `# 独立锚点 PRD
+
+## 5.1 登录页
+
+这是页面描述段落。
+<!-- pa: page-home -->
+
+下一页段落，不应挂 page-home。
+`,
+      },
+    })
+
+    await openViewer(page, proj, 'p[data-pa="page-home"]')
+    const prd = page.getByTestId('prd-content')
+    // 独立锚点行归并到「前一个段落」（而非下一段）
+    await expect(prd.locator('p[data-pa="page-home"]')).toContainText('这是页面描述段落。')
+    await expect(
+      prd.locator('p').filter({ hasText: '下一页段落，不应挂 page-home。' }),
+    ).not.toHaveAttribute('data-pa', /page-home/)
+    // 定位可用：点该段落「定位」→ 原型定位到 page-home（初始不在视口）
+    const para = prd.locator('p[data-pa="page-home"]')
+    await para.scrollIntoViewIfNeeded()
+    await para.hover()
+    const box = await para.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box!.x + 20, box!.y + 8)
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    await expect(protoFrame.locator('[data-pa="page-home"]')).toBeInViewport({ timeout: 5_000 })
+    await expect(protoFrame.locator('[data-pa="page-home"]')).toHaveClass(/pp-anchor-flash/, {
+      timeout: 3_000,
+    })
+  })
+})
+
+test.describe('T 增强 同行多锚点', () => {
+  test('同行两个锚点 → data-pa 存两个 ID；点定位弹列表，选则定位到所选', async ({
+    page,
+    request,
+  }) => {
+    const proj = await createProjectWithContent(request, `多锚-${Date.now().toString(36)}`, {
+      protoFiles: {
+        'index.html': `<!DOCTYPE html><html><body>
+  <main data-pa="page-home" style="margin-top:5vh">首页</main>
+  <section data-pa="multi-a" style="margin-top:200vh">多锚点A</section>
+  <section data-pa="multi-b" style="margin-top:210vh">多锚点B</section>
+</body></html>`,
+      },
+      prdFile: {
+        name: '需求.md',
+        content: `# 多锚点 PRD
+
+## 5.2 双锚点部分 <!-- pa: multi-a --> <!-- pa: multi-b -->
+
+说明段落。
+`,
+      },
+    })
+
+    await openViewer(page, proj, 'h2[data-pa~="multi-a"]')
+    const prd = page.getByTestId('prd-content')
+    const heading = prd.locator('h2[data-pa~="multi-a"]')
+    // 同一行两个锚点 → data-pa 存空格分隔的两个 ID
+    await expect(heading).toHaveAttribute('data-pa', 'multi-a multi-b')
+    // hover → 点「定位」→ 弹出锚点 ID 列表
+    await heading.scrollIntoViewIfNeeded()
+    await heading.hover()
+    const box = await heading.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box!.x + 20, box!.y + 8)
+    const menu = page.getByTestId('anchor-menu')
+    await expect(menu).toBeVisible()
+    await expect(page.getByTestId('anchor-pick-multi-a')).toBeVisible()
+    await expect(page.getByTestId('anchor-pick-multi-b')).toBeVisible()
+    // 选择 multi-b → 原型定位到 multi-b
+    await page.getByTestId('anchor-pick-multi-b').click()
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    await expect(protoFrame.locator('[data-pa="multi-b"]')).toBeInViewport({ timeout: 5_000 })
+    await expect(protoFrame.locator('[data-pa="multi-b"]')).toHaveClass(/pp-anchor-flash/, {
+      timeout: 3_000,
+    })
   })
 })

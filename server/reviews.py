@@ -142,8 +142,9 @@ def _anchor_excerpt(text: str, line_no: int, limit: int = 200) -> str:
 
     行尾注释（`- 账号输入 <!-- pa: x -->：支持手机号`）取本行剔注释后文本
     （注释及前导空白一并剔除，避免「账号输入 ：支持」的残缺空格）；
-    独立注释行（`<!-- pa: x -->`）锚点归属下一个内容块，取下一非空行。
-    markdown 前缀标记（#/列表符）剔除，保持摘录干净。
+    独立注释行（`<!-- pa: x -->`，含同行多个锚点）优先归并到「前一个段落/标题」
+    （与前端 anchor-plugin 挂载规则一致，T 增强）；前一块为列表/表格等非段落时
+    仍取下一个内容块。markdown 前缀标记（#/列表符）剔除，保持摘录干净。
     """
     lines = text.split("\n")
     line = lines[line_no - 1] if 0 < line_no <= len(lines) else ""
@@ -153,6 +154,9 @@ def _anchor_excerpt(text: str, line_no: int, limit: int = 200) -> str:
     stripped = re.sub(r"^[-*+]\s+", "", stripped).strip()
     if stripped:
         return stripped[:limit]
+    prev = _prev_content_excerpt(lines, line_no, limit)
+    if prev is not None:
+        return prev
     for nxt in lines[line_no:]:
         t = nxt.strip()
         if t:
@@ -160,6 +164,20 @@ def _anchor_excerpt(text: str, line_no: int, limit: int = 200) -> str:
             t = re.sub(r"^[-*+]\s+", "", t).strip()
             return t[:limit]
     return ""
+
+
+def _prev_content_excerpt(lines: list[str], line_no: int, limit: int) -> str | None:
+    """独立注释行的「前一个内容块」摘录；前块是列表项/表格行（非段落/标题）
+    返回 None，调用方回退到下一内容块（与前端 anchor-plugin 规则一致）。"""
+    for prev in reversed(lines[: line_no - 1]):
+        t = prev.strip()
+        if not t:
+            continue
+        if re.match(r"^(?:[-*+]|\d+[.)])\s", t) or t.startswith("|"):
+            return None
+        t = re.sub(r"^#{1,6}\s*", "", t)
+        return t[:limit]
+    return None
 
 
 def _match_doc_anchor(root: str, anchor_id: str) -> dict | None:
