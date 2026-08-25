@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.auth import apply_auth_to_app
 from server.auth import bp as auth_bp
+from server.config import PROTO_ZIP_MAX_BYTES
 from server.models import init_tables
 from server.projects import bp as projects_bp
 from server.proto_proxy import bp as proto_proxy_bp
@@ -18,6 +19,9 @@ from server.shots import bp as shots_bp
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    # T8.2：上传 body 上限（原型 zip 100MB + multipart 开销余量；
+    # 超限 Flask 直接 413，与 Nginx client_max_body_size / dev 代理对齐）
+    app.config["MAX_CONTENT_LENGTH"] = PROTO_ZIP_MAX_BYTES + 10 * 1024 * 1024
 
     apply_auth_to_app(app)
     app.register_blueprint(auth_bp)
