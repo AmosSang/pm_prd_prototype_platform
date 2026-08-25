@@ -1,6 +1,5 @@
-"""pytest 配置：契约测试 fixture 索引 + 评论测试共用工具（T4.2 起）。"""
+"""pytest 配置：契约测试 fixture 索引 + 评论测试共用工具（T4.2 起；T8.1 去 Git 本地化修订）。"""
 import os
-import subprocess
 import sys
 
 # 让 tests/ 能导入 server 包
@@ -9,32 +8,30 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
-def make_anchor_remote(tmp_path, name: str = "cm") -> str:
-    """造带锚点（PRD 注释 + 原型 data-pa）的裸仓库远端（评论类测试共用）。"""
-    work = tmp_path / f"{name}-work"
-    bare = tmp_path / f"{name}.git"
-    work.mkdir()
-    subprocess.run(["git", "init", "-b", "main", str(work)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t.local"], check=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
-    (work / "prototype").mkdir()
-    (work / "prototype" / "index.html").write_text(
-        '<html><body><main data-pa="page-login"><form data-pa="login-form">'
-        '<input data-pa="login-account" placeholder="账号"></form></main></body></html>',
-        encoding="utf-8",
-    )
-    (work / "prd").mkdir()
-    (work / "prd" / "需求.md").write_text(
-        "# PRD\n\n"
-        "## 5.1 登录页 <!-- pa: page-login -->\n\n"
-        "- 账号输入 <!-- pa: login-account -->：支持手机号\n\n"
-        "补充段落。\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(work), "commit", "-qm", "init"], check=True)
-    subprocess.run(["git", "clone", "--bare", str(work), str(bare)], check=True, capture_output=True)
-    return str(bare)
+def make_local_project(projects_dir, slug: str = "cm-proj") -> str:
+    """造带锚点（PRD 注释 + 原型 data-pa）的本地项目目录（T8.1 评论类测试共用）。
+
+    结构与 ensure_project_dirs 骨架一致；projects_dir 通常是 monkeypatch
+    过的 PROJECTS_DIR 临时目录。
+    """
+    root = os.path.join(str(projects_dir), slug)
+    os.makedirs(os.path.join(root, "prototype"), exist_ok=True)
+    os.makedirs(os.path.join(root, "prd"), exist_ok=True)
+    os.makedirs(os.path.join(root, "reviews", "comments"), exist_ok=True)
+    os.makedirs(os.path.join(root, "reviews", "shots"), exist_ok=True)
+    with open(os.path.join(root, "prototype", "index.html"), "w", encoding="utf-8") as f:
+        f.write(
+            '<html><body><main data-pa="page-login"><form data-pa="login-form">'
+            '<input data-pa="login-account" placeholder="账号"></form></main></body></html>'
+        )
+    with open(os.path.join(root, "prd", "需求.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# PRD\n\n"
+            "## 5.1 登录页 <!-- pa: page-login -->\n\n"
+            "- 账号输入 <!-- pa: login-account -->：支持手机号\n\n"
+            "补充段落。\n"
+        )
+    return root
 
 
 def dom_payload(**over) -> dict:
@@ -56,21 +53,6 @@ def dom_payload(**over) -> dict:
     }
     p.update(over)
     return p
-
-
-def _git(root, *args: str) -> str:
-    """git 命令包装（返回 stdout.strip，失败抛 CalledProcessError）。"""
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-
-def _wait_ok(timeout: float = 20.0) -> None:
-    """等队列任务全部终态（断言失败即抛）。"""
-    from server.git_tasks import wait_tasks
-
-    assert wait_tasks(timeout=timeout), "队列任务未在时限内完成"
 
 
 def submit_comment(client, p, payload=None, **over):

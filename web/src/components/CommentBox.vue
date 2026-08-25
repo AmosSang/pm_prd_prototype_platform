@@ -64,8 +64,8 @@ function onSubmit() {
         <div class="cb-done-head">
           <span class="ok">✓ 已提交</span>
           <code class="cid" data-testid="submitted-cid">{{ result.comment_id }}</code>
-          <span class="syncing" title="git 提交由后台队列执行；失败时项目卡片会显示同步异常">
-            仓库同步中
+          <span class="syncing" title="评论已写入项目目录（T8.1 本地化存储）">
+            已存档
           </span>
           <button class="cb-btn" data-testid="comment-done" @click="emit('close')">完成</button>
         </div>

@@ -48,16 +48,16 @@ server/.venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试�
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
 import shutil
-from server.models import Comment, GitTask, Project, VerificationCode, init_tables
+from server.models import Comment, Project, VerificationCode, init_tables
 init_tables()
 n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
-# 清 T2.3/T2.4/T3.x/T4.x E2E 绑定的项目记录与本地 clone（否则重复跑 smoke
-# 卡片越积越多——残留同名卡片会让按名定位的用例 strict mode 冲突，也让
-# 「读首卡 slug」读到旧项目）。评论与落仓任务外键引用 projects，须先删。
+# 清 T2.3/T2.4/T3.x/T4.x/T8.1 E2E 建的项目记录与本地目录（否则重复跑 smoke
+# 卡片越积越多——残留同名卡片会让按名定位的用例 strict mode 冲突）。
+# 评论外键引用 projects，须先删。
 # 注意：只删 E2E 名单内项目的数据——run-smoke 跑在开发 DB 上，全表删除
 # 会误删用户真实项目的评论（T4.2 曾误全删 Comment，此处修正）
-from server.config import REPOS_DIR
+from server.config import PROJECTS_DIR
 import os
 e2e_projects = list(Project.select().where(
     (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目'])
@@ -66,10 +66,9 @@ e2e_projects = list(Project.select().where(
 e2e_ids = [p.id for p in e2e_projects]
 if e2e_ids:
     nc = Comment.delete().where(Comment.project << e2e_ids).execute()
-    nt = GitTask.delete().where(GitTask.project << e2e_ids).execute()
-    print(f'[smoke] 清理 e2e 评论 {nc} 条 / 落仓任务 {nt} 条')
+    print(f'[smoke] 清理 e2e 评论 {nc} 条')
 for p in e2e_projects:
-    shutil.rmtree(os.path.join(REPOS_DIR, p.project_id), ignore_errors=True)
+    shutil.rmtree(os.path.join(PROJECTS_DIR, p.project_id), ignore_errors=True)
     p.delete_instance()
 print('[smoke] 清理 e2e 项目记录')
 " || true

@@ -228,8 +228,7 @@ async function submitComment(form: { content: string; priority: string; scope: s
       shot_id: shotId || undefined,
       highlight_rect: rect || undefined,
     })
-    // T4.3：git 落仓走异步队列（git_task pending），提交不再被 git 结果
-    // 阻塞；失败会置项目 sync_error（首页卡片「同步异常」提示）
+    // T8.1 去 Git 本地化：评论直写项目目录，提交即落文件（无异步队列）
     submittedResult.value = res
     refreshComments() // T4.4：更新抽屉数据 + 原型角标
   } catch (e) {
@@ -742,7 +741,7 @@ onBeforeUnmount(() => {
     <header class="v-head">
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
-      <span class="meta">{{ slug }} · {{ overview.project.branch }}</span>
+      <span class="meta">{{ slug }} · 创建者 {{ overview.project.creator.name }}</span>
       <!-- T4.5 项目级「可评论」开关：关闭后全员评论入口置灰（已有评论可查看）。
            PM 驱动 Agent 修改前关闭，同步刷新后再开启（消除 reviews/ 双写窗口） -->
       <span

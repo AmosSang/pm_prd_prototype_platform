@@ -2,21 +2,17 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ApiError } from '../api'
-import { createProject, listProjects, syncProject, type ProjectInfo } from '../projects'
+import { createProject, listProjects, type ProjectInfo } from '../projects'
 
 const backendStatus = ref<'checking' | 'ok' | 'fail'>('checking')
 const projects = ref<ProjectInfo[]>([])
 const loading = ref(false)
-const syncingId = ref<number | null>(null) // 正在同步的项目 id
 
-// 新建项目对话框
+// 新建项目对话框（T8.1：只填名称；内容由上传接口补充，T8.2）
 const dialogVisible = ref(false)
 const creating = ref(false)
 const form = reactive({
   name: '',
-  repo_url: '',
-  token: '',
-  branch: 'main',
 })
 
 async function refresh() {
@@ -37,37 +33,15 @@ async function onSubmit() {
   if (creating.value) return
   creating.value = true
   try {
-    const p = await createProject({ ...form })
-    ElMessage.success(`项目「${p.name}」绑定成功`)
+    const p = await createProject({ name: form.name })
+    ElMessage.success(`项目「${p.name}」创建成功`)
     dialogVisible.value = false
     form.name = ''
-    form.repo_url = ''
-    form.token = ''
-    form.branch = 'main'
     await refresh()
   } catch (e) {
-    // clone 失败的后端中文提示（认证失败/仓库不存在/网络）
-    ElMessage.error(e instanceof Error ? e.message : '绑定失败')
+    ElMessage.error(e instanceof Error ? e.message : '创建失败')
   } finally {
     creating.value = false
-  }
-}
-
-/** 手动同步（临时按钮）：拉远端最新内容后刷新列表。 */
-async function onSync(p: ProjectInfo) {
-  if (syncingId.value !== null) return
-  syncingId.value = p.id
-  try {
-    const updated = await syncProject(p.id)
-    ElMessage.success(`「${updated.name}」已同步到最新`)
-    await refresh()
-  } catch (e) {
-    if (!(e instanceof ApiError && e.code === 401)) {
-      ElMessage.error(e instanceof Error ? e.message : '同步失败')
-      await refresh() // sync_error 状态在卡片上可见
-    }
-  } finally {
-    syncingId.value = null
   }
 }
 
@@ -94,7 +68,7 @@ onMounted(async () => {
         }}</span>
       </span>
       <el-button type="primary" data-testid="new-project" @click="dialogVisible = true">
-        绑定新仓库
+        新建项目
       </el-button>
     </header>
 
@@ -104,7 +78,7 @@ onMounted(async () => {
       <!-- demo 项目（fixture 直连，无 DB 记录） -->
       <div class="card demo" data-testid="project-card-demo">
         <h2>演示项目（内置）</h2>
-        <p class="meta">demo · main · 本地 fixture</p>
+        <p class="meta">demo · 本地 fixture</p>
         <p>
           <router-link to="/demo/bridge">T1.1 沙箱桥接 →</router-link>
           <router-link to="/demo/shot">T1.2 截图链路 →</router-link>
@@ -118,48 +92,23 @@ onMounted(async () => {
         :data-testid="`project-card-${p.project_id}`"
       >
         <h2>{{ p.name }}</h2>
-        <p class="meta">{{ p.project_id }} · {{ p.branch }}</p>
-        <p class="repo" :title="p.repo_url">{{ p.repo_url }}</p>
-        <p v-if="p.sync_error" class="err">同步异常：{{ p.sync_error }}</p>
+        <p class="meta">{{ p.project_id }} · 创建者 {{ p.creator.name }}</p>
         <div class="card-actions">
           <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
             打开分屏查看器 →
           </router-link>
-          <el-button
-            size="small"
-            :loading="syncingId === p.id"
-            :data-testid="`sync-${p.project_id}`"
-            @click="onSync(p)"
-          >
-            同步
-          </el-button>
         </div>
       </div>
 
       <p v-if="projects.length === 0" class="hint">
-        还没有绑定的项目，点右上角「绑定新仓库」开始
+        还没有项目，点右上角「新建项目」开始
       </p>
     </section>
 
-    <el-dialog v-model="dialogVisible" title="绑定新仓库" width="520px">
+    <el-dialog v-model="dialogVisible" title="新建项目" width="520px">
       <el-form label-position="top" @submit.prevent>
         <el-form-item label="项目名" required>
           <el-input v-model="form.name" placeholder="如：CRM 改版" data-testid="form-name" maxlength="50" />
-        </el-form-item>
-        <el-form-item label="仓库地址" required>
-          <el-input v-model="form.repo_url" placeholder="https://gitlab.example.com/grp/repo.git" data-testid="form-repo-url" />
-        </el-form-item>
-        <el-form-item label="Access Token" required>
-          <el-input
-            v-model="form.token"
-            type="password"
-            show-password
-            placeholder="GitLab project access token（加密存储）"
-            data-testid="form-token"
-          />
-        </el-form-item>
-        <el-form-item label="分支">
-          <el-input v-model="form.branch" placeholder="main" data-testid="form-branch" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -167,11 +116,11 @@ onMounted(async () => {
         <el-button
           type="primary"
           :loading="creating"
-          :disabled="!form.name || !form.repo_url || !form.token"
+          :disabled="!form.name"
           data-testid="form-submit"
           @click="onSubmit"
         >
-          {{ creating ? '克隆中…' : '绑定并克隆' }}
+          {{ creating ? '创建中…' : '创建' }}
         </el-button>
       </template>
     </el-dialog>
@@ -212,14 +161,6 @@ onMounted(async () => {
 }
 .card h2 { font-size: 15px; margin: 0 0 6px; }
 .card .meta { color: #999; font-size: 12px; margin: 0 0 8px; }
-.card .repo {
-  color: #666;
-  font-size: 12px;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .card .err { color: #d33; font-size: 12px; }
 .card-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; }

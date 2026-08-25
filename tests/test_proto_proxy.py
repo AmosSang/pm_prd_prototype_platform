@@ -18,21 +18,23 @@ def test_project_id_pattern():
 
 
 def test_resolve_blocks_traversal(tmp_path, monkeypatch):
-    from server import proto_proxy
-
-    monkeypatch.setattr(proto_proxy, "REPOS_DIR", str(tmp_path))
-    (tmp_path / "demo" / "prototype" / "pages").mkdir(parents=True)
-    (tmp_path / "demo" / "prototype" / "pages" / "login.html").write_text("<html></html>")
+    """T8.1：数据源为 PROJECTS_DIR；非法路径/越出 prototype/ 全 404。"""
+    monkeypatch.setattr("server.storage.PROJECTS_DIR", str(tmp_path))
+    (tmp_path / "proj-x" / "prototype" / "pages").mkdir(parents=True)
+    (tmp_path / "proj-x" / "prototype" / "pages" / "login.html").write_text("<html></html>")
     # 非法路径全部 404
     with pytest.raises(Exception):
-        _resolve("demo", "prd/secret.md")
+        _resolve("proj-x", "prd/secret.md")
     with pytest.raises(Exception):
-        _resolve("demo", "prototype/../prd/secret.md")
+        _resolve("proj-x", "prototype/../prd/secret.md")
     with pytest.raises(Exception):
-        _resolve("demo", "")
+        _resolve("proj-x", "")
     # 合法路径解析成功
-    full = _resolve("demo", "prototype/pages/login.html")
+    full = _resolve("proj-x", "prototype/pages/login.html")
     assert full.endswith("login.html")
+    # storage 侧 slug 白名单更严（PROJECT_ID 允许前导 -，SLUG_RE 拒绝）→ 404
+    with pytest.raises(Exception):
+        _resolve("-lead", "prototype/index.html")
 
 
 def test_inject_bridge():

@@ -1,13 +1,14 @@
-"""评论测试（T4.1 schema 契约 + T4.2 提交链路）。
+"""评论测试（T4.1 schema 契约 + T4.2 提交链路；T8.1 去 Git 本地化修订）。
 
 契约锚点：《产品方案-V1.md》§3.3 评论数据结构（DOM 定位字段组）+
 《一期技术实现方案-V1.md》§2.3 payload 采集表。
 任务卡验收：T4.1 payload 字段完整性；T4.2 三类评论提交后
 DB 与 reviews/ 文件均出现（API 级验证，界面级走 E2E）。
+T8.1：落仓 = 直写项目目录（无队列），提交返回即断言文件存在；
+截图从临时区复制进项目 reviews/shots/。
 """
 import datetime as dt
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -139,10 +140,9 @@ def test_non_dict_rejected():
 # ═══════════════════════ T4.2 提交链路（POST /comments）═══════════════════════
 
 from server.app import create_app  # noqa: E402
-from server.git_tasks import wait_tasks  # noqa: E402
-from server.models import Comment, GitTask, Project, db  # noqa: E402
-from tests.conftest import _git, _wait_ok, make_anchor_remote  # noqa: E402
+from server.models import Comment, Project, db  # noqa: E402
 from tests.conftest import dom_payload as _dom_payload  # noqa: E402
+from tests.conftest import make_local_project  # noqa: E402
 from tests.conftest import submit_comment as _submit  # noqa: E402
 
 
@@ -150,9 +150,9 @@ from tests.conftest import submit_comment as _submit  # noqa: E402
 def app(tmp_path, monkeypatch):
     db.close()
     db.init(str(tmp_path / "test.db"))
-    repos_dir = tmp_path / "repos"
-    repos_dir.mkdir()
-    monkeypatch.setattr("server.gitops.REPOS_DIR", str(repos_dir))
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr("server.storage.PROJECTS_DIR", str(projects_dir))
     monkeypatch.setattr("server.reviews.SHOTS_DIR", str(tmp_path / "shots"))
 
     app = create_app()
@@ -163,28 +163,34 @@ def app(tmp_path, monkeypatch):
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
-        yield c, str(repos_dir)
+        yield c, str(projects_dir), str(tmp_path / "shots")
     db.close()
 
 
 @pytest.fixture()
-def project(app, tmp_path):
-    """绑定带锚点仓库，返回 (client, project_row)。"""
-    client, _ = app
-    remote = make_anchor_remote(tmp_path)
-    resp = client.post("/api/projects", json={
-        "name": "评论单测项目", "repo_url": remote, "token": "glpat-x", "branch": "main",
-    })
+def project(app):
+    """建项目 + 填充带锚点内容（模拟 T8.2 上传），返回 (client, project_row)。"""
+    client, projects_dir, _ = app
+    resp = client.post("/api/projects", json={"name": "评论单测项目"})
     assert resp.status_code == 200, resp.get_json()
     p = Project.get(Project.name == "评论单测项目")
+    make_local_project(projects_dir, p.project_id)
     return client, p
 
 
+def _cj_path(projects_dir, p, cid) -> Path:
+    return Path(projects_dir) / p.project_id / "reviews" / "comments" / f"{cid}.json"
+
+
+def _read_cj(projects_dir, p, cid) -> dict:
+    return json.loads(_cj_path(projects_dir, p, cid).read_text(encoding="utf-8"))
+
+
 class TestCreateComment:
-    def test_dom_comment_full_chain(self, app, project, tmp_path):
-        """DOM 评论全链路：DB + reviews/ 文件 + git commit/push（队列）+ doc 锚点匹配。"""
+    def test_dom_comment_full_chain(self, app, project):
+        """DOM 评论全链路：DB + reviews/ 文件直写（提交返回即存在）+ doc 锚点匹配。"""
         client, p = project
-        _, repos_dir = app
+        _, projects_dir, _ = app
 
         resp = _submit(client, p, _dom_payload(), priority="P1", scope="both")
         assert resp.status_code == 200, resp.get_json()
@@ -193,9 +199,8 @@ class TestCreateComment:
         assert cid.startswith("c-")
         assert data["status"] == "待确认"
         assert data["author"] == "产品桑"
-        # T4.3：git 走异步队列——请求返回时 pending，等队列跑完再断言 git 结果
-        assert data["git_task"]["status"] == "pending"
-        assert wait_tasks(timeout=20)
+        # T8.1：无 git 落仓任务，响应不带 git_task 字段
+        assert "git_task" not in data
 
         # DB 落库（展示缓存）
         row = Comment.get(Comment.comment_id == cid)
@@ -205,11 +210,8 @@ class TestCreateComment:
         assert cj["content"] == "测试评论内容"
         assert cj["priority"] == "P1"
 
-        # reviews/ 文件落仓（事实源）
-        root = Path(repos_dir) / p.project_id
-        fpath = root / "reviews" / "comments" / f"{cid}.json"
-        assert fpath.is_file()
-        fj = json.loads(fpath.read_text(encoding="utf-8"))
+        # reviews/ 文件直写（事实源，同步完成）
+        fj = _read_cj(projects_dir, p, cid)
         assert fj["comment_id"] == cid
         assert fj["status"] == "待确认"
         assert fj["anchor_id"] == "login-account"
@@ -218,53 +220,48 @@ class TestCreateComment:
         assert "账号输入" in fj["doc_excerpt"]
         assert fj["doc_file"] == "prd/需求.md"
 
-        # git：clone 与裸仓库（push 生效）最新 commit，作者=评论人
-        msg = subprocess.run(
-            ["git", "-C", str(root), "log", "-1", "--format=%s"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert msg == f"comment: {cid} 创建"
-        author = subprocess.run(
-            ["git", "-C", str(root), "log", "-1", "--format=%an"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert author == "产品桑"
-        bare = Path(p.repo_url)
-        remote_msg = subprocess.run(
-            ["git", "-C", str(bare), "log", "-1", "--format=%s"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert remote_msg == f"comment: {cid} 创建"
-        # 任务终态 done
-        task = GitTask.get(GitTask.ref_id == cid)
-        assert task.status == "done" and task.error is None
+    def test_shot_copied_into_project(self, app, project):
+        """截图从临时区复制进项目 reviews/shots/（T8.1：导出包天然同构）。"""
+        client, p = project
+        _, projects_dir, shots_dir = app
+        # 造临时截图（模拟 /api/projects/{slug}/shots 上传产物）
+        tmp_shot = Path(shots_dir) / p.project_id / "shot-abc.png"
+        tmp_shot.parent.mkdir(parents=True, exist_ok=True)
+        tmp_shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+        resp = _submit(client, p, _dom_payload(), shot_id="shot-abc",
+                       highlight_rect={"x": 1, "y": 2, "w": 3, "h": 4})
+        assert resp.status_code == 200, resp.get_json()
+        cid = resp.get_json()["data"]["comment_id"]
+
+        root = Path(projects_dir) / p.project_id
+        assert (root / "reviews" / "shots" / f"{cid}.png").read_bytes() == tmp_shot.read_bytes()
+        fj = _read_cj(projects_dir, p, cid)
+        assert fj["screenshot"] == f"shots/{cid}.png"
+        assert fj["highlight_rect"] == {"x": 1, "y": 2, "w": 3, "h": 4}
 
     def test_dom_comment_without_anchor_no_doc_link(self, app, project):
         """非锚点区域（候选锚点查 PRD 未命中）→ 标记「无 PRD 锚点关联」。"""
         client, p = project
+        _, projects_dir, _ = app
         resp = _submit(client, p, _dom_payload(anchor_id="", nearest_anchor_id=""))
         assert resp.status_code == 200
         cid = resp.get_json()["data"]["comment_id"]
-        fj = json.loads(
-            (Path(app[1]) / p.project_id / "reviews" / "comments" / f"{cid}.json")
-            .read_text(encoding="utf-8")
-        )
+        fj = _read_cj(projects_dir, p, cid)
         assert fj["doc_anchor_id"] == ""
         assert fj["doc_note"] == "无 PRD 锚点关联"
 
     def test_page_comment(self, app, project):
-        """页面评论（target_type=page）：正常提交落仓；outer_html 为空
+        """页面评论（target_type=page）：正常提交落文件；outer_html 为空
         （T4.2 修订：页面根的整页 HTML 无定位意义，bridge 不采集）。"""
         client, p = project
+        _, projects_dir, _ = app
         resp = _submit(client, p, _dom_payload(target_type="page", anchor_id="",
                                                nearest_anchor_id="", css_path="body",
                                                outer_html=""))
         assert resp.status_code == 200
         cid = resp.get_json()["data"]["comment_id"]
-        fj = json.loads(
-            (Path(app[1]) / p.project_id / "reviews" / "comments" / f"{cid}.json")
-            .read_text(encoding="utf-8")
-        )
+        fj = _read_cj(projects_dir, p, cid)
         assert fj["target_type"] == "page"
         assert fj["css_path"] == "body"
         assert fj["outer_html"] == ""
@@ -272,6 +269,7 @@ class TestCreateComment:
     def test_doc_comment_with_fingerprint(self, app, project):
         """文档评论（doc_block）：fingerprint = sha1(doc_path|excerpt)[:16]。"""
         client, p = project
+        _, projects_dir, _ = app
         import hashlib
 
         resp = _submit(client, p, _dom_payload(
@@ -282,10 +280,7 @@ class TestCreateComment:
         ), scope="doc")
         assert resp.status_code == 200
         cid = resp.get_json()["data"]["comment_id"]
-        fj = json.loads(
-            (Path(app[1]) / p.project_id / "reviews" / "comments" / f"{cid}.json")
-            .read_text(encoding="utf-8")
-        )
+        fj = _read_cj(projects_dir, p, cid)
         assert fj["target_type"] == "doc_block"
         assert fj["doc_anchor_id"] == "login-account"
         # 服务端按 PRD 命中结果计算指纹（doc_path 来自锚点标题链）
@@ -297,6 +292,7 @@ class TestCreateComment:
         """无锚点段落也可评论（T4.2 修订）：doc_anchor_id 空，指纹用前端
         现采的 doc_path（标题链）+ doc_excerpt 计算。"""
         client, p = project
+        _, projects_dir, _ = app
         import hashlib
 
         resp = _submit(client, p, _dom_payload(
@@ -308,10 +304,7 @@ class TestCreateComment:
         ), scope="doc")
         assert resp.status_code == 200
         cid = resp.get_json()["data"]["comment_id"]
-        fj = json.loads(
-            (Path(app[1]) / p.project_id / "reviews" / "comments" / f"{cid}.json")
-            .read_text(encoding="utf-8")
-        )
+        fj = _read_cj(projects_dir, p, cid)
         assert fj["doc_anchor_id"] == ""
         expect = hashlib.sha1("5.1 登录页|这段没有锚点，验证任意段落可评论。".encode()).hexdigest()[:16]
         assert fj["doc_block_fingerprint"] == expect
@@ -388,41 +381,15 @@ class TestCreateComment:
         assert resp.status_code == 400
         assert Comment.select().count() == 0
 
-    def test_push_failure_not_blocking(self, app, project):
-        """push 失败不阻塞评论：DB/文件已落，任务 error + sync_error（队列语义）。"""
-        client, p = project
-        _, repos_dir = app
-        # 远端不可达：改本地 clone 的 origin URL（push 走 .git/config 而非 DB repo_url）
-        root = Path(repos_dir) / p.project_id
-        subprocess.run(
-            ["git", "-C", str(root), "remote", "set-url", "origin", "/tmp/ppp-nonexistent-remote"],
-            check=True, capture_output=True,
-        )
-        resp = _submit(client, p, _dom_payload())
-        assert resp.status_code == 200, resp.get_json()  # 提交不被 git 阻塞
-        cid = resp.get_json()["data"]["comment_id"]
-        assert wait_tasks(timeout=20)
-
-        task = GitTask.get(GitTask.ref_id == cid)
-        assert task.status == "error"
-        assert task.retry_count >= 1
-        # 评论本体已完整落库落文件（本地 commit 也已做，仅 push 失败）
-        assert Comment.get(Comment.comment_id == cid)
-        assert (root / "reviews" / "comments" / f"{cid}.json").is_file()
-        # sync_error 落库（首页红点提示用）
-        p2 = Project.get_by_id(p.id)
-        assert p2.sync_error
-
 
 # ═══════════════════════ T4.4 列表 / 编辑 / 删除 / 批量状态 ═══════════════════════
 
 
 def _submit_simple(client, p, **over) -> str:
-    """快捷提交一条 dom 评论，返回 comment_id（队列同步跑完）。"""
+    """快捷提交一条 dom 评论，返回 comment_id（T8.1：直写文件，无队列等待）。"""
     resp = _submit(client, p, _dom_payload(**over))
     assert resp.status_code == 200, resp.get_json()
-    cid = resp.get_json()["data"]["comment_id"]
-    return cid
+    return resp.get_json()["data"]["comment_id"]
 
 
 class TestListComments:
@@ -461,8 +428,9 @@ class TestListComments:
 
 class TestBatchStatus:
     def test_confirm_full_chain(self, app, project):
-        """批量确认（任务卡验收）：DB 流转 + 落仓 JSON status 变更 + git log。"""
+        """批量确认（任务卡验收）：DB 流转 + 评论 JSON 直写 status 变更。"""
         client, p = project
+        _, projects_dir, _ = app
         c1 = _submit_simple(client, p)
         c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
 
@@ -474,20 +442,12 @@ class TestBatchStatus:
         assert data["to"] == "已确认待修改"
         assert sorted(data["updated"]) == sorted([c1, c2])
         assert data["skipped"] == []
-        _wait_ok()
 
-        # DB 流转
+        # DB 流转 + 文件直写（T8.1：无队列，响应返回即完成）
         for cid in (c1, c2):
             assert Comment.get(Comment.comment_id == cid).status == "已确认待修改"
-        # 落仓 JSON + git log（每条一个 commit）
-        root = Path(app[1]) / p.project_id
-        for cid in (c1, c2):
-            fj = json.loads((root / "reviews" / "comments" / f"{cid}.json").read_text(encoding="utf-8"))
+            fj = _read_cj(projects_dir, p, cid)
             assert fj["status"] == "已确认待修改"
-        msgs = _git(root, "log", "--format=%s").split("\n")
-        assert f"comment: {c2} → 已确认待修改" in msgs
-        assert f"comment: {c1} → 已确认待修改" in msgs
-        assert msgs[0] == f"comment: {c2} → 已确认待修改"  # 后确认的在顶
 
     def test_ignore_from_both_states(self, app, project):
         """忽略：待确认与已确认待修改都可忽略（旁路）。"""
@@ -534,8 +494,9 @@ class TestBatchStatus:
 
 class TestEditComment:
     def test_edit_by_author(self, app, project):
-        """作者编辑：DB + payload 更新，落仓 JSON 同步（COMMIT_EDIT）。"""
+        """作者编辑：DB + payload 更新，项目目录评论 JSON 直写同步。"""
         client, p = project
+        _, projects_dir, _ = app
         c1 = _submit_simple(client, p)
 
         resp = client.patch(f"/api/comments/{c1}", json={
@@ -546,13 +507,10 @@ class TestEditComment:
         assert row.priority == "P1"
         assert row.scope == "both"
         assert json.loads(row.payload_json)["content"] == "改后的评论内容"
-        _wait_ok()
 
-        root = Path(app[1]) / p.project_id
-        fj = json.loads((root / "reviews" / "comments" / f"{c1}.json").read_text(encoding="utf-8"))
+        fj = _read_cj(projects_dir, p, c1)
         assert fj["content"] == "改后的评论内容"
         assert fj["priority"] == "P1"
-        assert _git(root, "log", "-1", "--format=%s") == f"comment: {c1} 编辑"
 
     def test_edit_rules(self, app, project):
         """编辑规则：非作者拒；已确认待修改可编辑；忽略态拒；空内容拒。"""
@@ -589,8 +547,9 @@ class TestEditComment:
 
 class TestDeleteComment:
     def test_delete_by_author(self, app, project):
-        """作者删除：软删 DB + git rm 文件（COMMIT_DELETE）。"""
+        """作者删除：软删 DB + 项目目录评论 JSON/截图直接删除。"""
         client, p = project
+        _, projects_dir, _ = app
         c1 = _submit_simple(client, p)
 
         resp = client.delete(f"/api/comments/{c1}")
@@ -600,10 +559,9 @@ class TestDeleteComment:
         assert row.deleted is True
         assert client.get(f"/api/projects/{p.id}/comments").get_json()["data"] == []
 
-        _wait_ok()
-        root = Path(app[1]) / p.project_id
-        assert not (root / "reviews" / "comments" / f"{c1}.json").exists()
-        assert _git(root, "log", "-1", "--format=%s") == f"comment: {c1} 删除"
+        # T8.1：文件同步删除
+        assert not _cj_path(projects_dir, p, c1).exists()
+        assert not (Path(projects_dir) / p.project_id / "reviews" / "shots" / f"{c1}.png").exists()
 
     def test_delete_rules(self, app, project):
         """删除规则：忽略态拒；非作者拒；重复删 404。"""
@@ -630,12 +588,11 @@ class TestDeleteComment:
 class TestCommentableGuard:
     """T4.5 修订：关闭可评论后，一切写 reviews/ 的操作全部拦截
     （创建 T4.2 已拦；本次补批量状态/编辑/删除——开关的目的是消除
-    双写窗口，这些操作都会产生 commit）。查看不受影响。"""
+    双写窗口，这些操作都会写项目目录）。查看不受影响。"""
 
     def test_all_write_ops_blocked_when_off(self, app, project):
         client, p = project
         c1 = _submit_simple(client, p)
-        _wait_ok()
 
         p.commentable = False
         p.save()
