@@ -371,3 +371,125 @@ class TestUploadAPI:
         }, content_type="multipart/form-data")
         assert resp.status_code == 403
         assert "仅项目创建者" in resp.get_json()["msg"]
+
+    def test_upload_prototype_descends_unique_child(self, app):
+        """T8.2 智能下钻：zip 根无 html、唯一子目录（dist/）含 html → 下钻一层。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "下钻项目")
+
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "dist/index.html": "<html><body>hi</body></html>",
+                "dist/pages/login.html": "<html>login</html>",
+            })), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        # prototype/ = dist 内容（不是 dist/ 这层壳）
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+        assert os.path.isfile(os.path.join(root, "prototype", "pages", "login.html"))
+        assert not os.path.exists(os.path.join(root, "prototype", "dist"))
+        # 临时目录不残留
+        assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
+
+    def test_upload_prototype_no_html_rejected(self, app):
+        """T8.2：根与唯一一级子目录均无 html → 400（原型必含页面）。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "无html项目")
+
+        # 纯资源包（无 html）
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({"style.css": "body{}"})), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 400
+        assert "HTML" in resp.get_json()["msg"]
+
+        # 多子目录且只有其一含 html → 不下钻（唯一性不满足）→ 根无 html → 400
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "a/style.css": "x", "b/index.html": "<html>x</html>",
+            })), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 400
+        # 骨架 prototype/ 不被破坏（失败保留旧版本）
+        assert os.path.isdir(os.path.join(root, "prototype"))
+        assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
+
+    def test_upload_prototype_symlink_rejected(self, app):
+        """T8.2 软链拒绝：Unix 软链属性条目直接 400（防解压后指向任意路径）。"""
+        client, projects_dir = app
+        pid, _ = self._make_project(client, projects_dir, "软链项目")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            info = zipfile.ZipInfo("evil-link")
+            # 高 16 位 Unix 属性：0o120000 = S_IFLNK（软链标记）
+            info.external_attr = 0o120777 << 16
+            zf.writestr(info, "/etc/passwd")
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(buf.getvalue()), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 400
+        assert "软链" in resp.get_json()["msg"]
+
+
+# ───────────────────── 删除项目（T8.2）─────────────────────
+
+class TestDeleteProject:
+    def _make_project(self, client, projects_dir, name):
+        resp = client.post("/api/projects", json={"name": name})
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        return data["id"], data["project_id"], os.path.join(projects_dir, data["project_id"])
+
+    def test_delete_full_chain(self, app):
+        """删除全链路：目录 + 评论（DB）+ 项目记录一并清除。"""
+        from server.models import Comment
+
+        client, projects_dir = app
+        pid, slug, root = self._make_project(client, projects_dir, "待删项目")
+        # 铺内容 + 评论（外键引用）
+        client.post(f"/api/projects/{pid}/prd", data={
+            "file": (io.BytesIO(b"# x"), "a.md"),
+        }, content_type="multipart/form-data")
+        Comment.create(
+            comment_id="c-20990101-001", project=pid,
+            author_email="pm@corp.com", author_name="产品桑",
+            status="待确认", priority="P2", scope="prototype", target_type="dom",
+            payload_json="{}",
+        )
+        assert os.path.isdir(root)
+
+        resp = client.delete(f"/api/projects/{pid}")
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["data"]["deleted"] is True
+        # 目录与 DB 记录全清
+        assert not os.path.exists(root)
+        assert Project.get_or_none(Project.id == pid) is None
+        assert Comment.get_or_none(Comment.comment_id == "c-20990101-001") is None
+        # 列表不再出现
+        body = client.get("/api/projects").get_data(as_text=True)
+        assert "待删项目" not in body
+        # 重复删 404
+        assert client.delete(f"/api/projects/{pid}").status_code == 404
+
+    def test_delete_rules(self, app):
+        """删除规则：仅创建者（他人 403）；demo 不可删（内置 fixture 项目）。"""
+        client, projects_dir = app
+        pid, _, _ = self._make_project(client, projects_dir, "权限删除项目")
+
+        # 换用户 → 403
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+        resp = client.delete(f"/api/projects/{pid}")
+        assert resp.status_code == 403
+        assert "仅项目创建者" in resp.get_json()["msg"]
+        assert Project.get_by_id(pid) is not None  # 记录还在
+        with client.session_transaction() as sess:
+            sess["uid"] = 1
+
+        # demo 不可删（直接构造 demo 记录验证拒绝口径）
+        p_demo = Project.create(project_id="demo", name="演示", creator_id=1)
+        resp = client.delete(f"/api/projects/{p_demo.id}")
+        assert resp.status_code == 400
+        assert "不可删除" in resp.get_json()["msg"]
+        p_demo.delete_instance()  # 清理测试记录

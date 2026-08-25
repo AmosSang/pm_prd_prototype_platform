@@ -10,7 +10,8 @@ import { createProjectWithContent, type ProjectInfo } from './helpers'
  */
 
 const PROTO = {
-  'pages/login.html': '<html><body><main data-pa="page-login">登录页</main></body></html>',
+  // 顶层 index.html：T8.2 上传要求 zip 根顶层有 html（否则按 dist 壳下钻）
+  'index.html': '<html><body><main data-pa="page-login">登录页</main></body></html>',
 }
 const PRD = {
   name: '需求.md',

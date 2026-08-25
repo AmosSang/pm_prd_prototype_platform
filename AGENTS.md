@@ -62,7 +62,8 @@ status 四态：待确认 → 已确认待修改 → 已修改（创建者手动
 
 ```
 {project_id}/
-├── prototype/   原型 zip 解压产物（≤100MB 包；入口 index.html，多页放 pages/）
+├── prototype/   原型 zip 解压产物（≤100MB 包；入口 index.html，多页放 pages/；
+│                T8.2：zip 根顶层无 html 时自动下钻唯一子目录一层，如 dist/ 构建产物壳）
 ├── prd/         唯一一份 markdown 文档
 └── reviews/
     ├── comments/  每条评论一个 JSON
