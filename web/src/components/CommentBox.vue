@@ -6,13 +6,13 @@ import type { CommentPayload, CreateCommentResult } from '../projects'
  * T4.2 评论框（左侧底部，替换 T4.1 的采集结果面板）。
  *
  * 三态：
- * - composing：目标摘要（T4.1 采集字段，testid 保留）+ 表单
- *   （文字必填 / 优先级 P1-P3 默认 P2 / 范围默认按宿主推断 / 署名只读）
+ * - composing：目标摘要（T4.1 采集字段，testid 保留）+ 表单（文字必填 / 署名只读）
  * - submitting：由父组件控制（props.submitting），按钮 loading
  * - done：提交成功 + 截图预览（可查看不可编辑，产品方案 §4.5）
  *
  * 截图由父组件（Viewer）在提交时经 bridge 采集（提交时而非打开时——
  * 保证反映提交一刻状态）；本组件只管表单与展示。
+ * T 增强：表单不再含「优先级」「修改范围」（评论只保留内容）。
  */
 const props = defineProps<{
   payload: CommentPayload
@@ -25,22 +25,17 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  submit: [form: { content: string; priority: string; scope: string }]
+  submit: [form: { content: string }]
   close: []
 }>()
 
 const content = ref('')
-const priority = ref('P2')
-const scope = ref('prototype')
 
-// 换目标（重新点元素）重置表单；scope 默认按宿主推断（产品方案 §4.5）：
-// 文档评论 → doc，原型评论 → prototype
+// 换目标（重新点元素）重置表单
 watch(
   () => props.payload,
   () => {
     content.value = ''
-    priority.value = 'P2'
-    scope.value = props.payload.target_type === 'doc_block' ? 'doc' : 'prototype'
   },
   { immediate: true },
 )
@@ -49,8 +44,6 @@ function onSubmit() {
   if (!content.value.trim() || props.submitting) return
   emit('submit', {
     content: content.value.trim(),
-    priority: priority.value,
-    scope: scope.value,
   })
 }
 </script>
@@ -95,22 +88,6 @@ function onSubmit() {
           data-testid="comment-content"
         />
         <div class="cb-row">
-          <label>
-            优先级
-            <select v-model="priority" data-testid="comment-priority">
-              <option value="P1">P1 高</option>
-              <option value="P2">P2 中</option>
-              <option value="P3">P3 低</option>
-            </select>
-          </label>
-          <label>
-            修改范围
-            <select v-model="scope" data-testid="comment-scope">
-              <option value="prototype">仅原型</option>
-              <option value="doc">仅文档</option>
-              <option value="both">两侧同改</option>
-            </select>
-          </label>
           <label class="cb-author">
             署名
             <input type="text" :value="author" readonly data-testid="comment-author" />

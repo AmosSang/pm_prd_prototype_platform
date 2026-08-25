@@ -41,7 +41,7 @@ const emit = defineEmits<{
 
 const rootEl = ref<HTMLElement | null>(null)
 
-const STATUS_OPTIONS: CommentStatus[] = ['待确认', '已确认待修改', '已修改', '忽略']
+const STATUS_OPTIONS: CommentStatus[] = ['待确认', '已确认待修改', '已修改', '忽略', '延后再改']
 const EDITABLE: CommentStatus[] = ['待确认', '已确认待修改']
 
 const hostFilter = ref<'all' | 'proto' | 'doc'>('all')
@@ -55,8 +55,6 @@ const busy = ref(false)
 /** 编辑弹层状态 */
 const editing = ref<CommentItem | null>(null)
 const editContent = ref('')
-const editPriority = ref('P2')
-const editScope = ref('prototype')
 
 /** 位置键：同页面同锚点算同位置（合并展示口径）。
  * doc 分支与 Viewer.docLocKeyOf 同口径（payload.doc_anchor_id 优先，
@@ -153,42 +151,29 @@ const checkedList = computed(() =>
   props.comments.filter((c) => checked.value.has(c.comment_id)),
 )
 
-/** 可被当前动作处理的勾选项（状态机合法 + 项目可评论才可提交，
- * 其余后端也会跳过）。action 支持 confirm/ignore/mark_done/rework（T8.4）。 */
-function actionable(action: 'confirm' | 'ignore' | 'mark_done' | 'rework'): CommentItem[] {
-  if (props.commentable === false) return []
-  const from =
-    action === 'confirm'
-      ? ['待确认']
-      : action === 'mark_done'
-        ? ['已确认待修改']
-        : action === 'rework'
-          ? ['已修改']
-          : ['待确认', '已确认待修改']
-  return checkedList.value.filter((c) => from.includes(c.status))
-}
-
-const BATCH_LABEL: Record<string, string> = {
-  confirm: '确认',
-  ignore: '忽略',
-  mark_done: '标记已修改',
-  rework: '返工',
-}
-
-async function onBatch(action: 'confirm' | 'ignore' | 'mark_done' | 'rework') {
-  const items = actionable(action)
+// T 增强：批量修改状态——任意状态 → 任意目标状态（无硬性状态机限制）；
+// 仍仅创建者可操作（后端逐条校验），项目可评论关闭时禁用。
+async function onBatchStatus(target: CommentStatus) {
+  const items = checkedList.value
   if (!items.length || busy.value) return
+  if (props.commentable === false) {
+    ElMessage.warning('项目已关闭评论，无法修改状态')
+    return
+  }
   busy.value = true
   try {
     const res = await batchStatus(
       items.map((c) => c.comment_id),
-      action,
+      target,
     )
     if (res.updated.length) {
-      ElMessage.success(`已${BATCH_LABEL[action]} ${res.updated.length} 条`)
+      ElMessage.success(`已修改 ${res.updated.length} 条为「${target}」`)
     }
     if (res.skipped.length) {
-      ElMessage.warning(`${res.skipped.length} 条不可操作（状态不符）`)
+      const hasPermission = res.skipped.some((s) => s.reason.includes('创建者'))
+      ElMessage.warning(
+        hasPermission ? `${res.skipped.length} 条不可操作（权限/关闭评论）` : `${res.skipped.length} 条跳过`,
+      )
     }
     checked.value = new Set()
     emit('refresh')
@@ -202,8 +187,6 @@ async function onBatch(action: 'confirm' | 'ignore' | 'mark_done' | 'rework') {
 function startEdit(c: CommentItem) {
   editing.value = c
   editContent.value = c.payload.content
-  editPriority.value = c.priority
-  editScope.value = c.scope
 }
 
 async function saveEdit() {
@@ -217,8 +200,6 @@ async function saveEdit() {
   try {
     await editComment(c.comment_id, {
       content: editContent.value.trim(),
-      priority: editPriority.value,
-      scope: editScope.value,
     })
     ElMessage.success('已保存')
     editing.value = null
@@ -263,7 +244,8 @@ function canEdit(c: CommentItem): boolean {
 
 // ───────────────── T8.5 抽屉增强：单条标记已修改 + 截图放大 ─────────────────
 
-/** 单条「标记已修改」：创建者专属，仅「已确认待修改」态（状态闭环不依赖 Agent 回写）。 */
+/** 单条「标记已修改」：创建者专属，仅「已确认待修改」态的快捷入口
+ * （T 增强：底层已是任意→任意，这里只是快捷方式）。 */
 function canMarkDone(c: CommentItem): boolean {
   return (
     props.isCreator &&
@@ -276,7 +258,7 @@ async function markDoneOne(c: CommentItem) {
   if (busy.value) return
   busy.value = true
   try {
-    const res = await batchStatus([c.comment_id], 'mark_done')
+    const res = await batchStatus([c.comment_id], '已修改')
     if (res.updated.length) {
       ElMessage.success('已标记为已修改')
       emit('refresh')
@@ -372,44 +354,34 @@ watch(
       </label>
     </div>
 
-    <!-- 按钮行：四个批量操作（仅创建者） -->
+    <!-- T 增强：批量修改状态（单个按钮 + 目标状态菜单；任意→任意，仅创建者） -->
     <div v-if="isCreator" class="drawer-actions">
-      <button
-        class="op confirm"
-        :disabled="!actionable('confirm').length || busy"
-        data-testid="batch-confirm"
-        title="待确认 → 已确认待修改（落仓）"
-        @click="onBatch('confirm')"
+      <el-dropdown
+        :disabled="!checkedList.length || busy || commentable === false"
+        trigger="click"
+        @command="onBatchStatus"
       >
-        批量确认
-      </button>
-      <button
-        class="op mark"
-        :disabled="!actionable('mark_done').length || busy"
-        data-testid="batch-mark-done"
-        title="已确认待修改 → 已修改（状态闭环，创建者）"
-        @click="onBatch('mark_done')"
-      >
-        标记已修改
-      </button>
-      <button
-        class="op ignore"
-        :disabled="!actionable('ignore').length || busy"
-        data-testid="batch-ignore"
-        title="标记不处理（落仓）"
-        @click="onBatch('ignore')"
-      >
-        批量忽略
-      </button>
-      <button
-        class="op rework"
-        :disabled="!actionable('rework').length || busy"
-        data-testid="batch-rework"
-        title="已修改 → 已确认待修改（返工再改，创建者）"
-        @click="onBatch('rework')"
-      >
-        返工
-      </button>
+        <button
+          class="op confirm batch-status"
+          :disabled="!checkedList.length || busy || commentable === false"
+          data-testid="batch-status-btn"
+          title="将勾选的评论统一改为目标状态（任意状态→任意状态）"
+        >
+          批量修改状态（{{ checkedList.length }}）▾
+        </button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item
+              v-for="s in STATUS_OPTIONS"
+              :key="s"
+              :command="s"
+              :data-testid="`batch-to-${s}`"
+            >
+              改为「{{ s }}」
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <!-- 列表 -->
@@ -461,8 +433,6 @@ watch(
                   <el-tag size="small" :type="statusTagType(c.status)" data-testid="comment-status">
                     {{ c.status }}
                   </el-tag>
-                  <span class="pri">{{ c.priority }}</span>
-                  <span class="scope">{{ c.scope === 'prototype' ? '原型' : c.scope === 'doc' ? '文档' : '两侧' }}</span>
                   <span class="author">{{ c.author_name }}</span>
                   <span class="time">{{ c.created_at.slice(0, 16).replace('T', ' ') }}</span>
                   <span class="ops">
@@ -528,22 +498,6 @@ watch(
         </div>
         <textarea v-model="editContent" rows="4" maxlength="2000" data-testid="edit-content" />
         <div class="edit-row">
-          <label>
-            优先级
-            <select v-model="editPriority" data-testid="edit-priority">
-              <option value="P1">P1 高</option>
-              <option value="P2">P2 中</option>
-              <option value="P3">P3 低</option>
-            </select>
-          </label>
-          <label>
-            修改范围
-            <select v-model="editScope" data-testid="edit-scope">
-              <option value="prototype">仅原型</option>
-              <option value="doc">仅文档</option>
-              <option value="both">两侧同改</option>
-            </select>
-          </label>
           <button
             class="op confirm"
             :disabled="busy || !editContent.trim()"
@@ -707,7 +661,6 @@ watch(
   flex-wrap: wrap;
 }
 .cid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; color: #2b5cff; }
-.pri { color: #b8860b; }
 .author { color: #57606a; }
 .time { color: #b0b7c0; }
 .ops { display: inline-flex; gap: 4px; margin-left: 4px; }

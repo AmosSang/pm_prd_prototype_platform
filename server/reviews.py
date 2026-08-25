@@ -40,8 +40,9 @@ bp = Blueprint("reviews", __name__)
 
 # target_type 三类评论宿主（产品方案 §3.3）
 TARGET_TYPES = ("dom", "page", "doc_block")
-PRIORITIES = ("P1", "P2", "P3")
-SCOPES = ("prototype", "doc", "both")
+
+# 评论五态（T 增强：原四态 + 延后再改；批量状态任意→任意，不做硬性状态机限制）
+STATUSES = ("待确认", "已确认待修改", "已修改", "忽略", "延后再改")
 
 # bridge 侧 outer_html 截断 4096 + 尾部省略标记；schema 侧留少量余量
 OUTER_HTML_MAX = 4100
@@ -263,20 +264,16 @@ def _build_comment_json(
     author_name: str,
     payload: dict,
     content: str,
-    priority: str,
-    scope: str,
     doc: dict | None,
     shot_rel: str | None,
     rect: dict | None,
 ) -> dict:
-    """组装评论 JSON（产品方案 §3.3 完整字段组）。"""
+    """组装评论 JSON（产品方案 §3.3 完整字段组；T 增强：不再含优先级/修改范围）。"""
     cj = {
         # 元信息
         "comment_id": cid,
         "author": author_name,
         "status": "待确认",
-        "priority": priority,
-        "scope": scope,
         "content": content,
         "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         # DOM 定位（bridge 采集原样落）
@@ -356,13 +353,6 @@ def create_comment(pid: int):
     if len(content) > CONTENT_MAX:
         return jsonify(code=400, msg=f"评论内容超过 {CONTENT_MAX} 字"), 400
 
-    priority = str(data.get("priority") or "P2")
-    if priority not in PRIORITIES:
-        return jsonify(code=400, msg=f"priority 必须是 {PRIORITIES} 之一"), 400
-    scope = str(data.get("scope") or "")
-    if scope not in SCOPES:
-        return jsonify(code=400, msg=f"scope 必须是 {SCOPES} 之一"), 400
-
     try:
         rect = _validate_rect(data.get("highlight_rect"))
     except ValueError as e:
@@ -396,9 +386,7 @@ def create_comment(pid: int):
     for _ in range(5):
         cid = _next_comment_id(root)
         shot_rel = f"shots/{cid}.png" if shot_src else None
-        cj = _build_comment_json(
-            cid, session["name"], payload, content, priority, scope, doc, shot_rel, rect
-        )
+        cj = _build_comment_json(cid, session["name"], payload, content, doc, shot_rel, rect)
         try:
             row = Comment.create(
                 comment_id=cid,
@@ -406,8 +394,6 @@ def create_comment(pid: int):
                 author_email=session["email"],
                 author_name=session["name"],
                 status=cj["status"],
-                priority=priority,
-                scope=scope,
                 target_type=cj["target_type"],
                 prototype_page=cj["prototype_page"] or None,
                 anchor_id=cj["anchor_id"] or None,
@@ -435,17 +421,9 @@ def create_comment(pid: int):
 
 # ───────────────────────── 评论列表 / 编辑 / 删除 / 批量状态（T4.4）──────────
 
-# 状态四态（产品方案 §3.4）：待确认 → 已确认待修改 → 已修改；忽略为旁路。
-# 可编辑/可删除态：待确认、已确认待修改（已修改/忽略只读，返工走 rework）
+# 可编辑/可删除态：待确认、已确认待修改（已修改/忽略/延后再改只读；T 增强：
+# 编辑/删除仍限「可编辑态」，与批量状态流转（任意→任意）解耦）
 EDITABLE_STATUSES = ("待确认", "已确认待修改")
-
-# 批量动作的合法源状态（batch-status 状态机；T8.4 收口为仅创建者 + 状态闭环）
-BATCH_ACTIONS = {
-    "confirm": {"from": ("待确认",), "to": "已确认待修改"},
-    "ignore": {"from": ("待确认", "已确认待修改"), "to": "忽略"},
-    "mark_done": {"from": ("已确认待修改",), "to": "已修改"},
-    "rework": {"from": ("已修改",), "to": "已确认待修改"},
-}
 
 
 def _comment_public(c: Comment) -> dict:
@@ -456,8 +434,6 @@ def _comment_public(c: Comment) -> dict:
         "author_name": c.author_name,
         "author_email": c.author_email,
         "status": c.status,
-        "priority": c.priority,
-        "scope": c.scope,
         "target_type": c.target_type,
         "prototype_page": c.prototype_page or "",
         "anchor_id": c.anchor_id or "",
@@ -498,9 +474,8 @@ def _get_live_comment(cid: str) -> Comment | None:
 def edit_comment(cid: str):
     """作者编辑（产品方案 §4.5 编辑规则）：仅作者 + 待确认/已确认待修改态。
 
-    可改 content / priority / scope；DB 先更新，T8.1 去 Git 本地化后直接
-    改写项目目录内评论 JSON（无队列）。项目关闭可评论时拒绝（写 reviews/
-    的操作都在拦截范围——开关的目的是消除双写窗口）。
+    可改 content（T 增强：移除 priority/scope）。DB 先更新，T8.1 去 Git
+    本地化后直接改写项目目录内评论 JSON（无队列）。项目关闭可评论时拒绝。
     """
     c = _get_live_comment(cid)
     if not c:
@@ -525,24 +500,10 @@ def edit_comment(cid: str):
         if len(content) > CONTENT_MAX:
             return jsonify(code=400, msg=f"评论内容超过 {CONTENT_MAX} 字"), 400
         fields["content"] = content
-    if "priority" in data:
-        priority = str(data.get("priority") or "")
-        if priority not in PRIORITIES:
-            return jsonify(code=400, msg=f"priority 必须是 {PRIORITIES} 之一"), 400
-        fields["priority"] = priority
-    if "scope" in data:
-        scope = str(data.get("scope") or "")
-        if scope not in SCOPES:
-            return jsonify(code=400, msg=f"scope 必须是 {SCOPES} 之一"), 400
-        fields["scope"] = scope
     if not fields:
-        return jsonify(code=400, msg="没有可更新字段（content/priority/scope）"), 400
+        return jsonify(code=400, msg="没有可更新字段（content）"), 400
 
     c.payload_json = json.dumps({**json.loads(c.payload_json), **fields}, ensure_ascii=False)
-    if "priority" in fields:
-        c.priority = fields["priority"]
-    if "scope" in fields:
-        c.scope = fields["scope"]
     c.updated_at = utcnow_str()
     c.save()
 
@@ -584,22 +545,20 @@ def delete_comment(cid: str):
 
 @bp.post("/api/comments/batch-status")
 def batch_status():
-    """批量状态流转（产品方案 §4.5：PM 批量确认/忽略；T8.4 收口为仅创建者）。
+    """批量状态流转（T 增强：任意状态 → 任意目标状态，不做硬性状态机限制）。
 
-    状态机：confirm（待确认 → 已确认待修改）、ignore（待确认/已确认待修改
-    → 忽略）、mark_done（已确认待修改 → 已修改）、rework（已修改 → 已确认
-    待修改，返工闭环）。逐条：合法则 DB 更新 + 直接改写项目目录内评论 JSON
-    （T8.1 去 Git 本地化），非法（状态不符/不存在/跨项目/非创建者）跳过并报告。
+    参数：{cids: [...], status: 目标状态（五态之一）}。逐条：合法（存在、
+    未删、项目可评论、创建者项目）则 DB 更新 + 直接改写项目目录内评论 JSON
+    （T8.1 去 Git 本地化），其余（不存在/跨项目/非创建者/关评论）跳过并报告。
     """
     data = request.get_json(silent=True) or {}
-    action = str(data.get("action") or "")
+    to_status = str(data.get("status") or "")
     cids = data.get("cids")
-    if action not in BATCH_ACTIONS:
-        return jsonify(code=400, msg=f"action 必须是 {tuple(BATCH_ACTIONS)} 之一"), 400
+    if to_status not in STATUSES:
+        return jsonify(code=400, msg=f"status 必须是 {STATUSES} 之一"), 400
     if not isinstance(cids, list) or not cids or len(cids) > 100:
         return jsonify(code=400, msg="cids 须为非空数组（≤100 条）"), 400
 
-    rule = BATCH_ACTIONS[action]
     updated: list[str] = []
     skipped: list[dict] = []
     for cid in cids[:100]:
@@ -607,20 +566,20 @@ def batch_status():
         if not c:
             skipped.append({"comment_id": str(cid), "reason": "不存在"})
             continue
-        # T8.4 权限收口（§6）：状态流转仅创建者可操作；且批量条目须属创建者项目
+        # 权限收口（§6）：状态流转仅创建者可操作；且批量条目须属创建者项目
         if session.get("uid") != c.project.creator_id:
             skipped.append({"comment_id": c.comment_id, "reason": "仅项目创建者可操作状态"})
             continue
         if not c.project.commentable:
             skipped.append({"comment_id": c.comment_id, "reason": "项目已关闭评论"})
             continue
-        if c.status not in rule["from"]:
-            skipped.append({"comment_id": c.comment_id, "reason": f"「{c.status}」状态不可{action}"})
+        if c.status == to_status:
+            skipped.append({"comment_id": c.comment_id, "reason": f"已处于「{to_status}」状态"})
             continue
-        c.status = rule["to"]
+        c.status = to_status
         c.updated_at = utcnow_str()
         # payload 同步（评论 JSON 全量与列冗余一致）+ 直写文件（事实源）
-        cj = {**json.loads(c.payload_json), "status": rule["to"]}
+        cj = {**json.loads(c.payload_json), "status": to_status}
         c.payload_json = json.dumps(cj, ensure_ascii=False)
         c.save()
         # T8.1 去 Git 本地化：直接改写项目目录内评论 JSON（无队列）
@@ -630,7 +589,7 @@ def batch_status():
         updated.append(c.comment_id)
 
     return jsonify(code=0, data={
-        "action": action, "to": rule["to"],
+        "status": to_status,
         "updated": updated, "skipped": skipped,
     }), 200
 
@@ -700,8 +659,6 @@ def export_comments(pid: int):
             manifest_comments.append({
                 "comment_id": c.comment_id,
                 "status": c.status,
-                "priority": c.priority,
-                "scope": c.scope,
                 "has_shot": has_shot,
             })
 

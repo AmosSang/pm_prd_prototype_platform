@@ -195,7 +195,7 @@ class TestCreateComment:
         client, p = project
         _, projects_dir, _ = app
 
-        resp = _submit(client, p, _dom_payload(), priority="P1", scope="both")
+        resp = _submit(client, p, _dom_payload())
         assert resp.status_code == 200, resp.get_json()
         data = resp.get_json()["data"]
         cid = data["comment_id"]
@@ -204,6 +204,9 @@ class TestCreateComment:
         assert data["author"] == "产品桑"
         # T8.1：无 git 落仓任务，响应不带 git_task 字段
         assert "git_task" not in data
+        # T 增强：评论不再含 priority/scope
+        assert "priority" not in data
+        assert "scope" not in data
 
         # DB 落库（展示缓存）
         row = Comment.get(Comment.comment_id == cid)
@@ -211,7 +214,8 @@ class TestCreateComment:
         assert row.author_email == "pm@corp.com"
         cj = json.loads(row.payload_json)
         assert cj["content"] == "测试评论内容"
-        assert cj["priority"] == "P1"
+        assert "priority" not in cj
+        assert "scope" not in cj
 
         # reviews/ 文件直写（事实源，同步完成）
         fj = _read_cj(projects_dir, p, cid)
@@ -334,7 +338,7 @@ class TestCreateComment:
             Comment.create(
                 comment_id=cid, project=p.id,
                 author_email="pm@corp.com", author_name="产品桑",
-                status="待确认", priority="P2", scope="prototype", target_type="dom",
+                status="待确认", target_type="dom",
                 payload_json="{}", deleted=deleted,
             )
 
@@ -363,10 +367,16 @@ class TestCreateComment:
         assert resp.status_code == 400
         assert Comment.select().count() == 0
 
-    def test_bad_priority_scope_rejected(self, app, project):
+    def test_legacy_priority_scope_ignored(self, app, project):
+        """T 增强：请求里再带 priority/scope 被忽略（已移除字段，不报错）。"""
         client, p = project
-        assert _submit(client, p, _dom_payload(), priority="P0").status_code == 400
-        assert _submit(client, p, _dom_payload(), scope="everywhere").status_code == 400
+        _, projects_dir, _ = app
+        resp = _submit(client, p, _dom_payload(), priority="P0", scope="everywhere")
+        assert resp.status_code == 200
+        cid = resp.get_json()["data"]["comment_id"]
+        fj = _read_cj(projects_dir, p, cid)
+        assert "priority" not in fj
+        assert "scope" not in fj
 
     def test_missing_shot_rejected(self, app, project):
         """shot_id 对应截图不存在：400（客户端流程 bug 才会发生）。"""
@@ -419,7 +429,7 @@ class TestListComments:
         resp = client.get(f"/api/projects/{p.id}/comments?target_type=page")
         assert [i["comment_id"] for i in resp.get_json()["data"]] == [c3]
         # 筛选：status（先流转 c1 再验）
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        client.post("/api/comments/batch-status", json={"cids": [c1], "status": "已确认待修改"})
         resp = client.get(f"/api/projects/{p.id}/comments?status=已确认待修改")
         assert [i["comment_id"] for i in resp.get_json()["data"]] == [c1]
 
@@ -430,19 +440,21 @@ class TestListComments:
 
 
 class TestBatchStatus:
-    def test_confirm_full_chain(self, app, project):
-        """批量确认（任务卡验收）：DB 流转 + 评论 JSON 直写 status 变更。"""
+    # T 增强：任意状态 → 任意目标状态（无硬性状态机）；参数 status（目标状态）
+
+    def test_batch_to_status_full_chain(self, app, project):
+        """批量改状态：DB 流转 + 评论 JSON 直写 status 变更。"""
         client, p = project
         _, projects_dir, _ = app
         c1 = _submit_simple(client, p)
         c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
 
         resp = client.post("/api/comments/batch-status", json={
-            "cids": [c1, c2], "action": "confirm",
+            "cids": [c1, c2], "status": "已确认待修改",
         })
         assert resp.status_code == 200
         data = resp.get_json()["data"]
-        assert data["to"] == "已确认待修改"
+        assert data["status"] == "已确认待修改"
         assert sorted(data["updated"]) == sorted([c1, c2])
         assert data["skipped"] == []
 
@@ -452,46 +464,72 @@ class TestBatchStatus:
             fj = _read_cj(projects_dir, p, cid)
             assert fj["status"] == "已确认待修改"
 
-    def test_ignore_from_both_states(self, app, project):
-        """忽略：待确认与已确认待修改都可忽略（旁路）。"""
+    def test_any_state_to_any_state(self, app, project):
+        """五态任意互转：已忽略/延后再改等任意源状态都能改到任意目标状态。"""
         client, p = project
-        c1 = _submit_simple(client, p)
+        _, projects_dir, _ = app
+        c1 = _submit_simple(client, p)  # 待确认
         c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
-        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "confirm"})
 
+        # 待确认 → 延后再改（新状态）
         resp = client.post("/api/comments/batch-status", json={
-            "cids": [c1, c2], "action": "ignore",
+            "cids": [c1], "status": "延后再改",
         })
-        data = resp.get_json()["data"]
-        assert sorted(data["updated"]) == sorted([c1, c2])
-        for cid in (c1, c2):
-            assert Comment.get(Comment.comment_id == cid).status == "忽略"
+        assert resp.get_json()["data"]["updated"] == [c1]
+        assert Comment.get(Comment.comment_id == c1).status == "延后再改"
+        assert _read_cj(projects_dir, p, c1)["status"] == "延后再改"
 
-    def test_invalid_transitions_skipped(self, app, project):
-        """状态机：已忽略不可再 confirm/ignore（跳过并报告）。"""
+        # 延后再改 → 已修改（跨任意态直达，无状态机限制）
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1], "status": "已修改",
+        })
+        assert resp.get_json()["data"]["updated"] == [c1]
+        assert Comment.get(Comment.comment_id == c1).status == "已修改"
+
+        # 待确认 → 忽略
+        client.post("/api/comments/batch-status", json={"cids": [c2], "status": "忽略"})
+        # 已忽略 → 待确认（直接改回，无硬限制）
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c2], "status": "待确认",
+        })
+        assert resp.get_json()["data"]["updated"] == [c2]
+        assert Comment.get(Comment.comment_id == c2).status == "待确认"
+
+    def test_same_status_skipped(self, app, project):
+        """目标状态相同：跳过并报告「已处于该状态」（无状态机限制，仅避免空操作）。"""
         client, p = project
         c1 = _submit_simple(client, p)
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
-
-        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1], "status": "待确认",
+        })
         data = resp.get_json()["data"]
         assert data["updated"] == []
-        assert len(data["skipped"]) == 1
-        assert "不可confirm" in data["skipped"][0]["reason"]
+        assert data["skipped"][0]["reason"] == "已处于「待确认」状态"
 
+    def test_invalid_and_missing_skipped(self, app, project):
+        client, p = project
+        c1 = _submit_simple(client, p)
         # 不存在的 cid 跳过
         resp = client.post("/api/comments/batch-status", json={
-            "cids": ["c-20990101-999"], "action": "confirm",
+            "cids": ["c-20990101-999"], "status": "已确认待修改",
         })
         assert resp.get_json()["data"]["skipped"][0]["reason"] == "不存在"
+        # 存在的正常流转
+        resp = client.post("/api/comments/batch-status", json={
+            "cids": [c1], "status": "已确认待修改",
+        })
+        assert resp.get_json()["data"]["updated"] == [c1]
 
     def test_bad_request_rejected(self, app, project):
         client, p = project
         assert client.post("/api/comments/batch-status", json={
-            "cids": ["x"], "action": "reopen",
+            "cids": ["x"], "status": "不存在态",
         }).status_code == 400
         assert client.post("/api/comments/batch-status", json={
-            "cids": [], "action": "confirm",
+            "cids": [], "status": "待确认",
+        }).status_code == 400
+        assert client.post("/api/comments/batch-status", json={
+            "cids": ["x"], "action": "confirm",  # 旧参数 action 已废弃 → 缺 status → 400
         }).status_code == 400
 
     def test_batch_creator_only(self, app, project):
@@ -503,50 +541,23 @@ class TestBatchStatus:
             sess["uid"] = 2
             sess["email"] = "other@corp.com"
             sess["name"] = "其他人"
-        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "status": "已确认待修改"})
         data = resp.get_json()["data"]
         assert data["updated"] == []
         assert data["skipped"][0]["reason"] == "仅项目创建者可操作状态"
         # 状态未变
         assert Comment.get(Comment.comment_id == c1).status == "待确认"
 
-    def test_mark_done_and_rework_closure(self, app, project):
-        """T8.4 状态闭环：mark_done（已确认待修改→已修改）+ rework（已修改→已确认待修改）。"""
+    def test_postpone_then_done_closure(self, app, project):
+        """T 增强：延后再改 → 已修改（闭环语义的新工作流）。"""
         client, p = project
         _, projects_dir, _ = app
         c1 = _submit_simple(client, p)
-        # 确认 → 已确认待修改
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
-        assert Comment.get(Comment.comment_id == c1).status == "已确认待修改"
-
-        # mark_done → 已修改
-        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "mark_done"})
+        client.post("/api/comments/batch-status", json={"cids": [c1], "status": "延后再改"})
+        assert Comment.get(Comment.comment_id == c1).status == "延后再改"
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "status": "已修改"})
         assert resp.get_json()["data"]["updated"] == [c1]
-        assert Comment.get(Comment.comment_id == c1).status == "已修改"
-        # 项目目录评论 JSON 同步（直写事实源）
-        fj = _read_cj(projects_dir, p, c1)
-        assert fj["status"] == "已修改"
-
-        # rework（返工）→ 已确认待修改
-        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "rework"})
-        assert resp.get_json()["data"]["updated"] == [c1]
-        assert Comment.get(Comment.comment_id == c1).status == "已确认待修改"
-
-    def test_mark_done_state_machine(self, app, project):
-        """状态机：mark_done 仅接受「已确认待修改」源状态（待确认/忽略态跳过）。"""
-        client, p = project
-        c1 = _submit_simple(client, p)  # 待确认
-        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
-        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "confirm"})
-        c3 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
-        client.post("/api/comments/batch-status", json={"cids": [c3], "action": "ignore"})
-
-        resp = client.post("/api/comments/batch-status", json={"cids": [c1, c2, c3], "action": "mark_done"})
-        data = resp.get_json()["data"]
-        assert data["updated"] == [c2]  # 仅已确认待修改可流转
-        assert len(data["skipped"]) == 2
-        assert Comment.get(Comment.comment_id == c1).status == "待确认"
-        assert Comment.get(Comment.comment_id == c2).status == "已修改"
+        assert _read_cj(projects_dir, p, c1)["status"] == "已修改"
 
 
 class TestEditComment:
@@ -557,17 +568,16 @@ class TestEditComment:
         c1 = _submit_simple(client, p)
 
         resp = client.patch(f"/api/comments/{c1}", json={
-            "content": "改后的评论内容", "priority": "P1", "scope": "both",
+            "content": "改后的评论内容",
         })
         assert resp.status_code == 200, resp.get_json()
         row = Comment.get(Comment.comment_id == c1)
-        assert row.priority == "P1"
-        assert row.scope == "both"
         assert json.loads(row.payload_json)["content"] == "改后的评论内容"
 
         fj = _read_cj(projects_dir, p, c1)
         assert fj["content"] == "改后的评论内容"
-        assert fj["priority"] == "P1"
+        assert "priority" not in fj
+        assert "scope" not in fj
 
     def test_edit_rules(self, app, project):
         """编辑规则（T8.4 §6）：创建者可编辑任意状态；非创建者作者限自己的
@@ -575,7 +585,7 @@ class TestEditComment:
         client, p = project
         # 创建者作者 c1：忽略态仍可编辑（创建者跨状态管理者语义）
         c1 = _submit_simple(client, p)
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
+        client.post("/api/comments/batch-status", json={"cids": [c1], "status": "忽略"})
         assert client.patch(f"/api/comments/{c1}", json={"content": "创建者改忽略态"}).status_code == 200
 
         # 非创建者作者（uid=2）发评论 c2：待确认态可编辑；忽略态不可编辑
@@ -589,7 +599,7 @@ class TestEditComment:
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
-        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "ignore"})
+        client.post("/api/comments/batch-status", json={"cids": [c2], "status": "忽略"})
         with client.session_transaction() as sess:
             sess["uid"] = 2
             sess["email"] = "other@corp.com"
@@ -638,7 +648,7 @@ class TestDeleteComment:
         client, p = project
         # 创建者作者 c1：忽略态仍可删（跨状态管理者语义）
         c1 = _submit_simple(client, p)
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
+        client.post("/api/comments/batch-status", json={"cids": [c1], "status": "忽略"})
         assert client.delete(f"/api/comments/{c1}").status_code == 200
 
         # 非创建者作者（uid=2）发评论 c2：忽略态不可删；创建者可删 + 重复删 404
@@ -651,7 +661,7 @@ class TestDeleteComment:
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
-        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "ignore"})
+        client.post("/api/comments/batch-status", json={"cids": [c2], "status": "忽略"})
         with client.session_transaction() as sess:
             sess["uid"] = 2
             sess["email"] = "other@corp.com"
@@ -688,7 +698,7 @@ class TestCommentableGuard:
 
         # 批量确认：跳过并报告「项目已关闭评论」
         resp = client.post("/api/comments/batch-status", json={
-            "cids": [c1], "action": "confirm",
+            "cids": [c1], "status": "已确认待修改",
         })
         data = resp.get_json()["data"]
         assert data["updated"] == []
@@ -752,7 +762,7 @@ class TestExportComments:
                                doc_path="5.1 登录页", scope="doc")
         c_pend = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
         c_del = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
-        client.post("/api/comments/batch-status", json={"cids": [c_dom], "action": "confirm"})
+        client.post("/api/comments/batch-status", json={"cids": [c_dom], "status": "已确认待修改"})
         client.delete(f"/api/comments/{c_del}")  # 软删（导出须排除）
         return c_dom, c_doc, c_pend, c_del
 

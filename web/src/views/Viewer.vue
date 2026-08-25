@@ -305,7 +305,7 @@ function takeScreenshot(
 }
 
 /** 提交评论：截图 → 上传 → POST /comments（DB + reviews/ 落仓）。 */
-async function submitComment(form: { content: string; priority: string; scope: string }) {
+async function submitComment(form: { content: string }) {
   const payload = capturedPayload.value
   if (!payload || !overview.value || submitting.value) return
   submitting.value = true
@@ -340,8 +340,6 @@ async function submitComment(form: { content: string; priority: string; scope: s
     const res = await createComment(overview.value.project.id, {
       payload,
       content: form.content,
-      priority: form.priority,
-      scope: form.scope,
       shot_id: shotId || undefined,
       highlight_rect: rect || undefined,
     })

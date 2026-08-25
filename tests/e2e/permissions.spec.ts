@@ -102,7 +102,7 @@ test('T8.4 双用户权限：创建者可见专属按钮，普通用户不可见
   const cid = (await commentResp.json()).data.comment_id as string
 
   const st = await p2.request.post('/api/comments/batch-status', {
-    data: { cids: [cid], action: 'confirm' },
+    data: { cids: [cid], status: '已确认待修改' },
   })
   expect(st.status()).toBe(200)
   expect((await st.json()).data.skipped[0].reason).toBe('仅项目创建者可操作状态')

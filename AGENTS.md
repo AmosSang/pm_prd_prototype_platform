@@ -39,10 +39,10 @@ platform/
 
 1. **注入不改文件**：bridge.js 只在 HTTP 响应中注入原型 HTML，严禁修改 /data/projects 下项目文件（上传产物保持纯净）
 2. **锚点保护**：既有的 `<!-- pa: xxx -->` 与 `data-pa` 锚点不许删除、不许改名（内容生产与平台共用铁律）
-3. **评论状态流转权限**：状态流转（确认/忽略/标记已修改）仅项目创建者可操作；「已确认待修改」是交付修改的标准范围
+3. **评论状态流转权限**：状态流转（批量改状态）仅项目创建者可操作；**任意状态 → 任意目标状态**，无硬性状态机限制（五态：待确认/已确认待修改/已修改/忽略/延后再改）；「已确认待修改」是交付修改的标准范围
 4. **沙箱**：原型 iframe 独立 origin（:8081）+ sandbox 属性；平台侧 message 监听必须校验 event.origin
 5. **事实源**：评论以项目目录 reviews/ 为事实源，平台 DB 是展示缓存；评论导出包按 reviews/ 同构组织
-6. **权限**：创建者专属操作（上传原型/PRD、导出评论、可评论开关、删除项目、编辑/删除任意评论、状态流转）后端逐接口校验，越权一律 403；「可评论」开关关闭 = 冻结一切写评论操作（浏览不受影响）
+6. **权限**：创建者专属操作（上传原型/PRD、导出评论、可评论开关、删除项目、编辑/删除任意评论、批量改状态）后端逐接口校验，越权一律 403；删除项目创建者或超管均可（T 增强）；「可评论」开关关闭 = 冻结一切写评论操作（浏览不受影响）
 7. **上传安全**：原型 zip 解压必须过安全校验（路径穿越/解压总量/条目数/软链），校验通过才原子替换 prototype/，失败保留旧版本
 8. **用户停用**：`User.disabled` 账号不发验证码、已登录会话在任意 /api/ 调用被 401 强制登出；用户增删改（建/改名/停启用）仅超管，禁止停用超管本人；超管由 `ADMIN_EMAIL` 幂等种子
 
@@ -56,9 +56,9 @@ platform/
 
 ### 4.2 评论 JSON（reviews/comments/{comment_id}.json）
 
-字段组：元信息（comment_id/author/status/priority/scope/content/created_at）、DOM 定位（target_type/prototype_page/anchor_id/nearest_anchor_id/css_path/outer_html/text_excerpt）、视觉上下文（screenshot/highlight_rect）、交互状态（interaction_state）、文档关联（doc_anchor_id/doc_excerpt/doc_block_fingerprint）。
+字段组：元信息（comment_id/author/status/content/created_at）、DOM 定位（target_type/prototype_page/anchor_id/nearest_anchor_id/css_path/outer_html/text_excerpt）、视觉上下文（screenshot/highlight_rect）、交互状态（interaction_state）、文档关联（doc_anchor_id/doc_excerpt/doc_block_fingerprint）。priority/scope 已移除（T 增强）。
 
-status 四态：待确认 → 已确认待修改 → 已修改（创建者手动标记）；忽略为旁路。scope：prototype/doc/both。
+status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再改；批量改状态任意→任意，无硬性状态机限制（创建者可操作）。
 
 ### 4.3 项目目录约定（/data/projects/{project_id}/）
 
