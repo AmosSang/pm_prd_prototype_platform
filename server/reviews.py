@@ -4,7 +4,7 @@ T4.1：评论 payload（DOM 定位字段组）schema 校验——契约见《产
 §3.3 与《一期技术实现方案-V1.md》§2.3。
 T4.2：POST /api/projects/{pid}/comments 提交链路——校验 + comment_id 生成
 （c-YYYYMMDD-NNN）+ doc 锚点匹配 + DB 落库（展示缓存）+ reviews/ 落仓
-（写 JSON/截图 + git commit/push 同步版，T4.3 升级为串行队列）。
+（T8.1 去 Git 本地化：直接写项目目录，无队列、无 commit/push）。
 
 字段口径（bridge.js collectPayload 同源约定）：
   target_type        dom（原型元素）/ page（页面根）/ doc_block（PRD 块级元素）
@@ -29,7 +29,6 @@ import shutil
 import peewee
 from flask import Blueprint, jsonify, request, session
 
-from server.git_tasks import enqueue_comment, enqueue_delete, enqueue_edit, enqueue_status
 from server.models import Comment, Project, utcnow_str
 from server.projects import _list_md_files, _repo_root
 from server.reconcile import extract_prd_anchors
@@ -218,6 +217,27 @@ def _next_comment_id(root: str) -> str:
             return cid
 
 
+def _comment_file(root: str, cid: str) -> str:
+    """评论 JSON 文件路径（reviews/comments/{cid}.json，事实源 AGENTS.md §3.5）。"""
+    return os.path.join(root, "reviews", "comments", f"{cid}.json")
+
+
+def _write_comment_file(root: str, cid: str, cj: dict) -> None:
+    """T8.1 去 Git 本地化：评论 JSON 直接写项目目录（创建/编辑/状态流转共用）。"""
+    path = _comment_file(root, cid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cj, f, ensure_ascii=False, indent=2)
+
+
+def _remove_comment_files(root: str, cid: str) -> None:
+    """删除评论 JSON 与关联截图（T8.1：删除直接落文件系统，无 git rm 队列）。"""
+    for rel in (f"reviews/comments/{cid}.json", f"reviews/shots/{cid}.png"):
+        path = os.path.join(root, *rel.split("/"))
+        if os.path.isfile(path):
+            os.remove(path)
+
+
 def _build_comment_json(
     cid: str,
     author_name: str,
@@ -339,7 +359,7 @@ def create_comment(pid: int):
 
     root = _repo_root(p)
     if not os.path.isdir(root):
-        return jsonify(code=410, msg="本地 clone 不存在（可能已被移动或删除），请重新绑定"), 410
+        return jsonify(code=410, msg="项目目录不存在（可能已被删除），请联系创建者"), 410
 
     # doc 匹配：DOM/页面评论用候选锚点查 PRD；doc_block 用前端携带的锚点复核
     if payload["target_type"] == "doc_block":
@@ -348,7 +368,7 @@ def create_comment(pid: int):
         candidate = payload.get("anchor_id") or payload.get("nearest_anchor_id") or ""
         doc = _match_doc_anchor(root, str(candidate))
 
-    # comment_id → DB 先落（UNIQUE 兜底重试）→ 文件 → 入队。
+    # comment_id → DB 先落（UNIQUE 兜底重试）→ 文件写盘。
     # 并发提交（多 worker E2E / 多用户）下 count 读到相同值会生成重复 cid，
     # UNIQUE 约束拦截后重算顺延（最多 5 次；极端并发下仍失败返回 500）
     cj = None
@@ -382,27 +402,15 @@ def create_comment(pid: int):
         return jsonify(code=500, msg="评论 ID 生成冲突，请重试"), 500
     cid = cj["comment_id"]
 
-    # 落仓（T4.3 队列）：文件先写（新文件 untracked，与 worker 的 git 操作
-    # 无竞态），git add/commit/push 入队由每项目串行 worker 执行——请求即
-    # 返回不等待 git，push 冲突自动 rebase 重试，失败置 sync_error 不阻塞
+    # T8.1 去 Git 本地化：评论直接写项目目录（无队列、无 commit/push）。
+    # 截图从临时目录复制到项目 reviews/shots/（导出包天然同构）。
     if shot_src:
         shots_dir = os.path.join(root, "reviews", "shots")
         os.makedirs(shots_dir, exist_ok=True)
         shutil.copyfile(shot_src, os.path.join(shots_dir, f"{cid}.png"))
-    comments_dir = os.path.join(root, "reviews", "comments")
-    os.makedirs(comments_dir, exist_ok=True)
-    with open(os.path.join(comments_dir, f"{cid}.json"), "w", encoding="utf-8") as f:
-        json.dump(cj, f, ensure_ascii=False, indent=2)
+    _write_comment_file(root, cid, cj)
 
-    task = enqueue_comment(
-        p, cid, has_shot=bool(shot_src),
-        author_name=session["name"], author_email=session["email"],
-    )
-
-    return jsonify(
-        code=0,
-        data={**cj, "git_task": {"id": task.id, "status": task.status}},
-    ), 200
+    return jsonify(code=0, data=cj), 200
 
 
 # ───────────────────────── 评论列表 / 编辑 / 删除 / 批量状态（T4.4）──────────
@@ -468,8 +476,8 @@ def _get_live_comment(cid: str) -> Comment | None:
 def edit_comment(cid: str):
     """作者编辑（产品方案 §4.5 编辑规则）：仅作者 + 待确认/已确认待修改态。
 
-    可改 content / priority / scope；DB 先更新，文件修改入队（COMMIT_EDIT，
-    tracked 文件在 worker 内串行改）。项目关闭可评论时拒绝（写 reviews/
+    可改 content / priority / scope；DB 先更新，T8.1 去 Git 本地化后直接
+    改写项目目录内评论 JSON（无队列）。项目关闭可评论时拒绝（写 reviews/
     的操作都在拦截范围——开关的目的是消除双写窗口）。
     """
     c = _get_live_comment(cid)
@@ -512,14 +520,16 @@ def edit_comment(cid: str):
     c.updated_at = utcnow_str()
     c.save()
 
-    p = c.project
-    enqueue_edit(p, cid, fields, session["name"], session["email"])
+    # T8.1 去 Git 本地化：DB 更新后直接改写项目目录内评论 JSON（事实源）
+    root = _repo_root(c.project)
+    if os.path.isdir(root):
+        _write_comment_file(root, cid, json.loads(c.payload_json))
     return jsonify(code=0, data={"comment_id": cid, "updated": list(fields.keys())}), 200
 
 
 @bp.delete("/api/comments/<cid>")
 def delete_comment(cid: str):
-    """作者删除（仅待确认/已确认待修改态）：软删 DB + 入队 git rm。
+    """作者删除（仅待确认/已确认待修改态）：软删 DB + 删项目目录内文件。
     项目关闭可评论时拒绝（同编辑：写 reviews/ 的操作全部拦截）。"""
     c = _get_live_comment(cid)
     if not c:
@@ -534,7 +544,11 @@ def delete_comment(cid: str):
     c.deleted = True
     c.updated_at = utcnow_str()
     c.save()
-    enqueue_delete(c.project, cid, session["name"], session["email"])
+
+    # T8.1 去 Git 本地化：软删 DB 后直接删项目目录内评论 JSON 与截图
+    root = _repo_root(c.project)
+    if os.path.isdir(root):
+        _remove_comment_files(root, cid)
     return jsonify(code=0, data={"comment_id": cid, "deleted": True}), 200
 
 
@@ -544,7 +558,8 @@ def batch_status():
 
     状态机：confirm（待确认 → 已确认待修改）、ignore（待确认/已确认待修改
     → 忽略）。返工（已修改 → 已确认待修改）是 T5.2 范围。逐条：合法则
-    DB 更新 + 入队 COMMIT_STATUS，非法（状态不符/不存在）跳过并报告。
+    DB 更新 + 直接改写项目目录内评论 JSON（T8.1 去 Git 本地化），非法
+    （状态不符/不存在）跳过并报告。
     """
     data = request.get_json(silent=True) or {}
     action = str(data.get("action") or "")
@@ -570,11 +585,14 @@ def batch_status():
             continue
         c.status = rule["to"]
         c.updated_at = utcnow_str()
-        # payload 同步（评论 JSON 全量与列冗余一致）
-        c.payload_json = json.dumps({**json.loads(c.payload_json), "status": rule["to"]}, ensure_ascii=False)
+        # payload 同步（评论 JSON 全量与列冗余一致）+ 直写文件（事实源）
+        cj = {**json.loads(c.payload_json), "status": rule["to"]}
+        c.payload_json = json.dumps(cj, ensure_ascii=False)
         c.save()
-        # 每条一个 COMMIT_STATUS 任务（每条一个 commit，git log 清晰）
-        enqueue_status(c.project, c.comment_id, rule["to"], session["name"], session["email"])
+        # T8.1 去 Git 本地化：直接改写项目目录内评论 JSON（无队列）
+        root = _repo_root(c.project)
+        if os.path.isdir(root):
+            _write_comment_file(root, c.comment_id, cj)
         updated.append(c.comment_id)
 
     return jsonify(code=0, data={

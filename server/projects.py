@@ -1,27 +1,37 @@
-"""projects 蓝图（T2.3 / T2.4）：项目绑定、列表、查看器数据。
+"""projects 蓝图（T2.3 / T2.4 / T8.1）：项目创建、列表、查看器数据。
 
-接口（技术方案 §4）：
-- POST /api/projects {name, repo_url, token, branch} → 绑定仓库并 clone（T2.3）
-- GET  /api/projects → 列表（绝不含 token/encrypted_token）（T2.3）
+接口（技术方案 §4，T8.1 去 Git 本地化修订）：
+- POST /api/projects {name} → 创建项目（建目录 + DB 记录；creator=当前用户）
+- GET  /api/projects → 列表（含创建者信息与 is_creator 标记）
+- PATCH /api/projects/<pid> {commentable} → 可评论开关（T8.4 收权为创建者）
+- POST /api/projects/<pid>/prototype → 上传原型 zip（T8.1 最小版，仅创建者）
+- POST /api/projects/<pid>/prd → 上传 PRD markdown（T8.1 最小版，仅创建者）
 - GET  /api/projects/<pid>/overview → 文档列表 + 入口原型页（T2.4）
 - GET  /api/projects/<pid>/prd?file=xx.md → markdown 原文（T2.4）
 - GET  /api/projects/<pid>/reconcile → 锚点对账明细（T3.3）
 
 project_id：随机短 slug（kebab-case），与数字主键分离——
-本地 clone 目录、/proto/ 路径前缀都用它，路径不可猜测遍历（方案 §4 鉴权说明）。
+本地项目目录、/proto/ 路径前缀都用它，路径不可猜测遍历（方案 §4 鉴权说明）。
 """
+import io
 import os
 import re
 import secrets
+import shutil
+import zipfile
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 
-from server.config import DEMO_REPO_DIR
-from server.crypto_util import encrypt_token
-from server.gitops import CloneError, clone_project, pull_project, repo_path
-from server.models import Project, utcnow_str
+from server.config import (
+    PRD_MAX_BYTES,
+    PROTO_UNZIP_MAX_BYTES,
+    PROTO_UNZIP_MAX_FILES,
+    PROTO_ZIP_MAX_BYTES,
+)
+from server.models import Project, User, utcnow_str
 from server.page_map import parse_repo_page_map, scan_proto_anchors
 from server.reconcile import reconcile_repo
+from server.storage import ensure_project_dirs, project_root
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
@@ -33,58 +43,56 @@ def _err(msg: str, status: int):
 def _slug(name: str) -> str:
     """项目名 → kebab-case 短 slug（长度限 24，加随机后缀防撞）。"""
     s = "".join(c if c.isascii() and (c.isalnum() or c == "-") else "-" for c in name.lower())
-    import re
-
     s = re.sub(r"-{2,}", "-", s).strip("-")[:12] or "proj"
     return f"{s}-{secrets.token_hex(3)}"
 
 
+def _creator_public(creator_id: int) -> dict:
+    """创建者信息（列表/详情展示用）。"""
+    u = User.get_or_none(User.id == creator_id)
+    if not u:
+        return {"id": creator_id, "name": "（已删除用户）", "email": ""}
+    return {"id": u.id, "name": u.name, "email": u.email}
+
+
 def _project_public(p: Project) -> dict:
-    """列表/详情对外字段（无 token 类字段）。"""
+    """列表/详情对外字段（含创建者与 is_creator 标记）。"""
+    uid = session.get("uid")
     return {
         "id": p.id,
         "project_id": p.project_id,
         "name": p.name,
-        "repo_url": p.repo_url,
-        "branch": p.branch,
+        "creator": _creator_public(p.creator_id),
+        "is_creator": uid is not None and uid == p.creator_id,
         "commentable": p.commentable,
-        "last_sync_at": p.last_sync_at,
-        "sync_error": p.sync_error,
+        "content_updated_at": p.content_updated_at,
         "created_at": p.created_at,
     }
 
 
 @bp.post("")
 def create_project():
+    """创建项目（T8.1）：只填名称；建目录骨架 + DB 记录，creator=当前用户。
+
+    内容（原型 zip / PRD md）由 T8.2 上传接口补充——创建后项目为空，
+    查看器对空项目展示空态。
+    """
     data = request.get_json(silent=True) or {}
     name = str(data.get("name") or "").strip()
-    repo_url = str(data.get("repo_url") or "").strip()
-    token = str(data.get("token") or "").strip()
-    branch = str(data.get("branch") or "main").strip() or "main"
 
     if not name or len(name) > 50:
         return _err("项目名必填（50 字内）", 400)
-    if not repo_url.startswith(("http://", "https://", "/")):
-        return _err("仓库地址须为 http(s) URL 或本地绝对路径", 400)
-    if not token:
-        return _err("git token 必填（GitLab project access token）", 400)
 
-    # 先 clone（失败不落库），成功再建 DB 记录
+    uid = session.get("uid")
+    if not uid:
+        return _err("未登录", 401)
+
     project_id = _slug(name)
-    encrypted = encrypt_token(token)
-    try:
-        clone_project(project_id, repo_url, encrypted, branch)
-    except CloneError as e:
-        return _err(e.hint, 400)
-
+    ensure_project_dirs(project_id)
     p = Project.create(
         project_id=project_id,
         name=name,
-        repo_url=repo_url,
-        encrypted_token=encrypted,
-        branch=branch,
-        last_sync_at=utcnow_str(),
-        sync_error=None,
+        creator_id=uid,
     )
     return jsonify(code=0, data=_project_public(p)), 200
 
@@ -99,10 +107,9 @@ def list_projects():
 def update_project(pid: int):
     """项目设置更新（T4.5）：commentable 可评论开关。
 
-    产品方案 §4.5：默认开启；关闭后全员评论入口置灰（已有评论仍可查看，
-    POST /comments 已在 T4.2 拦截）。用途：PM 驱动 Agent 修改前关闭开关
-    消除 reviews/ 双写窗口，平台同步刷新后再开启。一期无角色权限，
-    登录用户均可操作。
+    产品方案 §4.5：默认开启；关闭后全员评论入口置灰、一切写评论操作
+    被拦截（已有评论仍可查看）。T8.4 将收权为仅创建者可操作（本卡先
+    保持登录用户均可，前端按钮 T8.4 一并按 is_creator 显隐）。
     """
     p = Project.get_or_none(Project.id == pid)
     if not p:
@@ -120,34 +127,124 @@ def update_project(pid: int):
     return jsonify(code=0, data=_project_public(p)), 200
 
 
-@bp.get("/<int:pid>/git-status")
-def git_status(pid: int):
-    p = Project.get_or_none(Project.id == pid)
-    if not p:
-        return _err("项目不存在", 404)
-    return jsonify(code=0, data={"last_sync_at": p.last_sync_at, "sync_error": p.sync_error}), 200
+# ───────────────────── 内容上传（T8.1 最小版；T8.2 补前端 UI 与部署层限额）─────────────────────
 
 
-@bp.post("/<int:pid>/sync")
-def sync_project(pid: int):
-    """手动同步（临时按钮，T3.1 插入）：fetch + merge --ff-only 拉最新内容。
+def _require_creator(p: Project):
+    """创建者专属校验（AGENTS.md 硬规则 6：上传原型/PRD 仅创建者）。"""
+    uid = session.get("uid")
+    if not uid or uid != p.creator_id:
+        return _err("仅项目创建者可上传内容", 403)
+    return None
 
-    注意：这不是 T5.1 的完整 SYNC_PULL——后者还含 pull --rebase、
-    reviews/ 全量比对修正 DB、对账重算。本接口只做最简拉取 +
-    last_sync_at/sync_error 维护，T5.1 实现时将被替换。
+
+def _safe_unzip(data: bytes, dest: str) -> None:
+    """安全解压（AGENTS.md 硬规则 7）：zip-slip 拒绝 + 条目数/解压总量限额。
+
+    逐条目 realpath 校验目标在 dest 内——路径穿越条目直接拒绝（不是净化）；
+    校验全过才解压（防解压炸弹：超限在写盘前拦截）。
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise ValueError("不是合法的 zip 包") from e
+
+    entries = zf.infolist()
+    if len(entries) > PROTO_UNZIP_MAX_FILES:
+        raise ValueError(f"压缩包条目数超过 {PROTO_UNZIP_MAX_FILES}")
+    total = sum(info.file_size for info in entries)
+    if total > PROTO_UNZIP_MAX_BYTES:
+        raise ValueError(f"解压总量超过 {PROTO_UNZIP_MAX_BYTES // 1024 // 1024}MB 上限")
+
+    dest_real = os.path.realpath(dest)
+    for info in entries:
+        target = os.path.realpath(os.path.join(dest, *info.filename.split("/")))
+        if target != dest_real and not target.startswith(dest_real + os.sep):
+            raise ValueError(f"压缩包含路径穿越条目：{info.filename}")
+    zf.extractall(dest)
+
+
+@bp.post("/<int:pid>/prototype")
+def upload_prototype(pid: int):
+    """上传原型 zip：校验通过 → 解压临时目录 → 原子替换 prototype/，失败保留旧版本。
+
+    T8.1 最小版（E2E/脚本用）：安全校验齐全（zip-slip/条目数/总量/包大小），
+    仅创建者；T8.2 补前端上传 UI、Nginx/dev 代理 body 限额与进度提示。
     """
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
-    try:
-        pull_project(p.project_id, p.encrypted_token, p.branch)
-    except CloneError as e:
-        p.sync_error = e.hint
-        p.save()
-        return _err(e.hint, 400)
+    deny = _require_creator(p)
+    if deny:
+        return deny
 
-    p.sync_error = None
-    p.last_sync_at = utcnow_str()
+    f = request.files.get("zip")
+    if f is None:
+        return _err("缺少 zip 文件", 400)
+    data = f.read(PROTO_ZIP_MAX_BYTES + 1)
+    if len(data) > PROTO_ZIP_MAX_BYTES:
+        return _err(f"原型包超过 {PROTO_ZIP_MAX_BYTES // 1024 // 1024}MB 上限", 413)
+
+    root = _repo_root(p)
+    if not os.path.isdir(root):
+        return _err("项目目录不存在", 410)
+
+    tmp_dir = os.path.join(root, ".prototype-tmp")
+    old_dir = os.path.join(root, ".prototype-old")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    shutil.rmtree(old_dir, ignore_errors=True)
+    try:
+        os.makedirs(tmp_dir)
+        _safe_unzip(data, tmp_dir)
+    except ValueError as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _err(str(e), 400)
+
+    # 原子替换：旧目录先让位，新目录就位后再清旧（中途失败仍有一份完整）
+    proto_dir = os.path.join(root, "prototype")
+    if os.path.isdir(proto_dir):
+        os.rename(proto_dir, old_dir)
+    os.rename(tmp_dir, proto_dir)
+    shutil.rmtree(old_dir, ignore_errors=True)
+
+    p.content_updated_at = utcnow_str()
+    p.save()
+    return jsonify(code=0, data=_project_public(p)), 200
+
+
+@bp.post("/<int:pid>/prd")
+def upload_prd(pid: int):
+    """上传 PRD markdown（≤5MB）：替换 prd/ 旧文档（唯一一份，保留上传文件名）。仅创建者。"""
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    deny = _require_creator(p)
+    if deny:
+        return deny
+
+    f = request.files.get("file")
+    if f is None:
+        return _err("缺少 file 文件", 400)
+    filename = os.path.basename(f.filename or "")
+    if not filename.lower().endswith(".md"):
+        return _err("仅支持 markdown 文档", 400)
+    data = f.read(PRD_MAX_BYTES + 1)
+    if len(data) > PRD_MAX_BYTES:
+        return _err(f"文档超过 {PRD_MAX_BYTES // 1024 // 1024}MB 上限", 413)
+
+    root = _repo_root(p)
+    if not os.path.isdir(root):
+        return _err("项目目录不存在", 410)
+    prd_dir = os.path.join(root, "prd")
+    os.makedirs(prd_dir, exist_ok=True)
+    # 替换旧文档（prd/ 唯一 markdown 约定，产品方案 §3）
+    for old in os.listdir(prd_dir):
+        if old.lower().endswith(".md"):
+            os.remove(os.path.join(prd_dir, old))
+    with open(os.path.join(prd_dir, filename), "wb") as out:
+        out.write(data)
+
+    p.content_updated_at = utcnow_str()
     p.save()
     return jsonify(code=0, data=_project_public(p)), 200
 
@@ -158,10 +255,8 @@ SAFE_FILE = re.compile(r"^[\w\-./\u4e00-\u9fff ]+$")
 
 
 def _repo_root(p: Project) -> str:
-    """项目仓库根目录：demo 走 fixture，其余走 /data/repos（与 proto_proxy 一致）。"""
-    if p.project_id == "demo":
-        return os.path.realpath(DEMO_REPO_DIR)
-    return os.path.realpath(repo_path(p.project_id))
+    """项目根目录（T8.1：demo 走 fixture，其余走 /data/projects）。"""
+    return project_root(p.project_id)
 
 
 def _list_md_files(root: str) -> list[str]:

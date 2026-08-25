@@ -1,7 +1,10 @@
-"""原型代理：读 /data/repos/{project}/prototype/{path}，HTML 注入 bridge.js。
+"""原型代理：读 /data/projects/{project}/prototype/{path}，HTML 注入 bridge.js。
+
+T8.1 去 Git 本地化：数据源从 /data/repos（clone 目录）切到
+/data/projects（上传解压目录），demo 项目特判 fixture 不变。
 
 硬规则（AGENTS.md §3）：
-1. 注入只发生在 HTTP 响应中，严禁修改磁盘上仓库文件
+1. 注入只发生在 HTTP 响应中，严禁修改磁盘上项目文件
 2. 路径校验防目录穿越
 """
 import os
@@ -9,11 +12,10 @@ import re
 
 from flask import Blueprint, Response, abort
 
-from server.config import DATA_DIR, DEMO_REPO_DIR, PLATFORM_DIR, PORT
+from server.config import PLATFORM_DIR, PORT
+from server.storage import project_dir
 
 bp = Blueprint("proto_proxy", __name__)
-
-REPOS_DIR = os.path.join(DATA_DIR, "repos")
 
 SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 PROJECT_ID = re.compile(r"^[a-z0-9-]{1,32}$")
@@ -40,10 +42,11 @@ CONTENT_TYPES = {
 
 
 def _repo_root(project_id: str) -> str:
-    """项目仓库根目录：demo 项目指向 fixture，其余走 /data/repos。"""
-    if project_id == "demo":
-        return os.path.realpath(DEMO_REPO_DIR)
-    return os.path.realpath(os.path.join(REPOS_DIR, project_id))
+    """项目根目录（T8.1）：demo 走 fixture，其余走 /data/projects。"""
+    try:
+        return os.path.realpath(project_dir(project_id))
+    except ValueError:
+        abort(404)
 
 
 def _resolve(project_id: str, rel_path: str) -> str:
