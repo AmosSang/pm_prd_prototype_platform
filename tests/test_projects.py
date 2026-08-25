@@ -547,3 +547,20 @@ class TestDeleteProject:
         assert resp.status_code == 400
         assert "不可删除" in resp.get_json()["msg"]
         p_demo.delete_instance()  # 清理测试记录
+
+    def test_delete_by_admin(self, app):
+        """T 增强：超级管理员可删除任意项目（他人创建也能删）。"""
+        from server.models import User
+
+        client, projects_dir = app
+        pid, slug, _ = self._make_project(client, projects_dir, "超管删除项目")
+        User.create(id=999, email="boss@corp.com", name="超管", is_admin=True)
+        with client.session_transaction() as sess:
+            sess["uid"] = 999
+        resp = client.delete(f"/api/projects/{pid}")
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["data"]["deleted"] is True
+        assert not os.path.exists(os.path.join(projects_dir, slug))
+        assert Project.get_or_none(Project.id == pid) is None
+        # 清理测试用户
+        User.delete().where(User.id == 999).execute()

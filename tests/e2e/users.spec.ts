@@ -87,6 +87,18 @@ test.describe('T2.1 用户管理（超管）', () => {
       id = list.data.find((u: { email: string }) => u.email === DISABLED_EMAIL).id
     }
     await page.request.patch(`/api/users/${id}/status`, { data: { disabled: true } })
+
+    // T 增强：超管删除任意项目（page.request 带超管登录态；「非创建者超管可删」
+    // 权限矩阵由后端单测 TestDeleteProject::test_delete_by_admin 覆盖）
+    const { createProject } = await import('./helpers')
+    const delProj = await createProject(page.request, `超管删除-${Date.now().toString(36)}`)
+    await page.goto('/')
+    const card = page.locator('.card', { hasText: delProj.project_id })
+    await expect(card).toBeVisible({ timeout: 10_000 })
+    await card.getByTestId(`del-${delProj.project_id}`).click()
+    await confirmDialog(page)
+    await expect(page.getByText('已删除')).toBeVisible({ timeout: 5_000 })
+    await expect(card).toBeHidden({ timeout: 5_000 })
   })
 
   test('停用账号登录 → toast 账号已停用', async ({ page }) => {

@@ -141,6 +141,19 @@ def _require_creator(p: Project):
     return None
 
 
+def _require_admin_or_creator(p: Project):
+    """删除权限（T 增强）：项目创建者 或 超级管理员 可删任意项目。"""
+    uid = session.get("uid")
+    if not uid:
+        return _err("未登录", 401)
+    if uid == p.creator_id:
+        return None
+    u = User.get_or_none(User.id == uid)
+    if u is not None and u.is_admin:
+        return None
+    return _err("仅项目创建者或超级管理员可删除", 403)
+
+
 def _is_junk_entry(name: str) -> bool:
     """macOS Finder 压缩产物垃圾条目：__MACOSX/ 资源目录、.DS_Store、
     ._xxx 资源 fork（AppleDouble）。这些不是原型内容，直接跳过不解压。"""
@@ -309,7 +322,7 @@ def upload_prd(pid: int):
 
 @bp.delete("/<int:pid>")
 def delete_project(pid: int):
-    """删除项目（T8.2）：目录 + 评论（DB）+ 项目记录一并清除，仅创建者。
+    """删除项目（T8.2；T 增强：创建者或超管）：目录 + 评论（DB）+ 项目记录一并清除。
 
     硬规则：demo 项目（fixture）不可删；目录删除失败时 DB 记录保留
     （宁可留脏数据也不留无主目录——用户可重试）。
@@ -317,7 +330,7 @@ def delete_project(pid: int):
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
-    deny = _require_creator(p)
+    deny = _require_admin_or_creator(p)
     if deny:
         return deny
     if p.project_id == "demo":
