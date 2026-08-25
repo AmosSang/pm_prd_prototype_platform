@@ -465,8 +465,7 @@ test.describe('T4.4 评论列表抽屉', () => {
     await expect(page.getByTestId('comment-group-title')).toHaveText('index.html')
     await expect(page.getByTestId('loc-count')).toHaveText('×2')
 
-    // 勾选 2 条（合并组需先展开）
-    await page.getByTestId('comment-loc').click() // 展开合并组
+    // 勾选 2 条（T8.6：默认所有元素/段落均展开，无需先展开合并组）
     for (const c of cids) {
       await page.getByTestId(`ck-${c}`).check()
     }
@@ -800,10 +799,9 @@ test.describe('T8.5 评论抽屉增强', () => {
     })
     expect(r.ok()).toBeTruthy()
 
-    // 打开抽屉：两条同锚点合并组（×2），先展开
+    // 打开抽屉：两条同锚点合并组（×2，T8.6 默认展开，无需先展开）
     await page.getByTestId('drawer-toggle').click()
     await expect(page.getByTestId('comment-drawer')).toBeVisible()
-    await page.getByTestId('comment-loc').click() // 展开合并组
     // 单条「标记已修改」按钮出现（创建者）
     await expect(page.getByTestId(`mark-done-${cids[0]}`)).toBeVisible()
     // 单条标记 → 已修改
@@ -961,5 +959,47 @@ test.describe('T8.6 弹窗精简与抽屉右侧化', () => {
     await page.mouse.up()
     const after = (await drawer.boundingBox())!.width
     expect(after, '向左拖拽后评论栏应变宽').toBeGreaterThan(before + 20)
+  })
+
+  test('抽屉标题栏/筛选行/按钮行 + 页面级折叠默认全部展开', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+    // DOM 评论（index.html 组）
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d1 = await submitAndWait(page, '页面折叠DOM')
+    await page.getByTestId('comment-done').click()
+    // 文档评论（PRD 文档组）
+    const li = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    await li.waitFor()
+    const b = (await li.boundingBox())!
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2)
+    await page.mouse.click(b.x + b.width - 40, b.y + 8)
+    const d2 = await submitAndWait(page, '页面折叠文档')
+    await page.getByTestId('comment-done').click()
+
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    // 标题栏（pane-head 同款）：评论数 + 已选数
+    await expect(page.locator('.drawer-head')).toContainText('评论（2）')
+    await expect(page.locator('.drawer-head')).toContainText('已选 0')
+    // 筛选行 + 按钮行（创建者）
+    await expect(page.getByTestId('filter-host')).toBeVisible()
+    await expect(page.getByTestId('filter-status')).toBeVisible()
+    await expect(page.getByTestId('batch-confirm')).toBeVisible()
+    await expect(page.getByTestId('batch-mark-done')).toBeVisible()
+    await expect(page.getByTestId('batch-ignore')).toBeVisible()
+    await expect(page.getByTestId('batch-rework')).toBeVisible()
+    // 默认全部展开：两个页面级组的条目均可见
+    await expect(page.locator(`[data-cid="${d1.comment_id}"]`)).toBeVisible()
+    await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeVisible()
+
+    // 折叠 PRD 文档组 → 其条目隐藏，index.html 组不受影响
+    const prdGroup = page.locator('.group-head', { hasText: 'PRD 文档' })
+    await prdGroup.click()
+    await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeHidden()
+    await expect(page.locator(`[data-cid="${d1.comment_id}"]`)).toBeVisible()
+    // 再点击展开恢复
+    await prdGroup.click()
+    await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeVisible()
   })
 })

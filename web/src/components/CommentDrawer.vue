@@ -47,7 +47,9 @@ const EDITABLE: CommentStatus[] = ['待确认', '已确认待修改']
 const hostFilter = ref<'all' | 'proto' | 'doc'>('all')
 const statusFilter = ref<'all' | CommentStatus>('all')
 const checked = ref<Set<string>>(new Set())
-const expanded = ref<Set<string>>(new Set()) // 展开的合并组 key
+// T8.6：折叠状态反向存储（默认空集 = 全部展开）。页面级用 collapsedGroups，元素/段落级用 collapsedLocs。
+const collapsedGroups = ref<Set<string>>(new Set())
+const collapsedLocs = ref<Set<string>>(new Set())
 const busy = ref(false)
 
 /** 编辑弹层状态 */
@@ -130,11 +132,21 @@ function toggleCheck(cid: string) {
   checked.value = s
 }
 
-function toggleExpand(key: string) {
-  const s = new Set(expanded.value)
+// T8.6：页面级 / 元素段落级折叠切换（默认空集 = 全部展开）
+function toggleGroup(key: string) {
+  const s = new Set(collapsedGroups.value)
   if (s.has(key)) s.delete(key)
   else s.add(key)
-  expanded.value = s
+  collapsedGroups.value = s
+}
+function toggleLoc(key: string) {
+  const s = new Set(collapsedLocs.value)
+  if (s.has(key)) s.delete(key)
+  else s.add(key)
+  collapsedLocs.value = s
+}
+function groupItemCount(g: Group): number {
+  return g.locs.reduce((n, l) => n + l.items.length, 0)
 }
 
 const checkedList = computed(() =>
@@ -304,15 +316,19 @@ watch([hostFilter, statusFilter], () => {
   checked.value = new Set([...checked.value].filter((cid) => visible.has(cid)))
 })
 
-// focusKey（文档段落角标点击）：展开对应合并组 + 滚动到该位置 + 高亮 2s。
-// key 值含 | 与中文（不做属性选择器查询，遍历比较 dataset 稳）
+// focusKey（文档段落角标点击）：确保对应合并组展开 + 滚动到该位置 + 高亮 2s。
+// key 值含 | 与中文（不做属性选择器查询，遍历比较 dataset 稳）。默认全展开，
+// 这里只需把可能被折叠的组/位置取消折叠。
 watch(
   () => props.focusKey,
   (k) => {
     if (!k) return
-    const s = new Set(expanded.value)
-    s.add(k)
-    expanded.value = s
+    const gs = new Set(collapsedGroups.value)
+    gs.delete(k)
+    collapsedGroups.value = gs
+    const ls = new Set(collapsedLocs.value)
+    ls.delete(k)
+    collapsedLocs.value = ls
     nextTick(() => {
       const locs = rootEl.value?.querySelectorAll<HTMLElement>('[data-lock]') || []
       for (const loc of locs) {
@@ -331,8 +347,14 @@ watch(
 <template>
   <div ref="rootEl" class="drawer" data-testid="comment-drawer">
     <!-- 工具栏 -->
-    <div class="bar">
-      <span class="bar-title">评论（{{ filtered.length }}）</span>
+    <!-- 标题栏（与原型/PRD 顶栏同款 pane-head 样式）：评论数 + 已选数 -->
+    <div class="drawer-head">
+      <span class="head-title">评论（{{ filtered.length }}）</span>
+      <span class="head-selected">已选 {{ checkedList.length }}</span>
+    </div>
+
+    <!-- 筛选行：宿主 + 状态 -->
+    <div class="drawer-filter">
       <label class="f">
         宿主
         <select v-model="hostFilter" data-testid="filter-host">
@@ -348,70 +370,77 @@ watch(
           <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
         </select>
       </label>
-      <span v-if="isCreator" class="batch">
-        已选 {{ checkedList.length }}
-        <button
-          class="op confirm"
-          :disabled="!actionable('confirm').length || busy"
-          data-testid="batch-confirm"
-          title="待确认 → 已确认待修改（落仓）"
-          @click="onBatch('confirm')"
-        >
-          批量确认
-        </button>
-        <button
-          class="op mark"
-          :disabled="!actionable('mark_done').length || busy"
-          data-testid="batch-mark-done"
-          title="已确认待修改 → 已修改（状态闭环，创建者）"
-          @click="onBatch('mark_done')"
-        >
-          标记已修改
-        </button>
-        <button
-          class="op ignore"
-          :disabled="!actionable('ignore').length || busy"
-          data-testid="batch-ignore"
-          title="标记不处理（落仓）"
-          @click="onBatch('ignore')"
-        >
-          批量忽略
-        </button>
-        <button
-          class="op rework"
-          :disabled="!actionable('rework').length || busy"
-          data-testid="batch-rework"
-          title="已修改 → 已确认待修改（返工再改，创建者）"
-          @click="onBatch('rework')"
-        >
-          返工
-        </button>
-      </span>
+    </div>
+
+    <!-- 按钮行：四个批量操作（仅创建者） -->
+    <div v-if="isCreator" class="drawer-actions">
+      <button
+        class="op confirm"
+        :disabled="!actionable('confirm').length || busy"
+        data-testid="batch-confirm"
+        title="待确认 → 已确认待修改（落仓）"
+        @click="onBatch('confirm')"
+      >
+        批量确认
+      </button>
+      <button
+        class="op mark"
+        :disabled="!actionable('mark_done').length || busy"
+        data-testid="batch-mark-done"
+        title="已确认待修改 → 已修改（状态闭环，创建者）"
+        @click="onBatch('mark_done')"
+      >
+        标记已修改
+      </button>
+      <button
+        class="op ignore"
+        :disabled="!actionable('ignore').length || busy"
+        data-testid="batch-ignore"
+        title="标记不处理（落仓）"
+        @click="onBatch('ignore')"
+      >
+        批量忽略
+      </button>
+      <button
+        class="op rework"
+        :disabled="!actionable('rework').length || busy"
+        data-testid="batch-rework"
+        title="已修改 → 已确认待修改（返工再改，创建者）"
+        @click="onBatch('rework')"
+      >
+        返工
+      </button>
     </div>
 
     <!-- 列表 -->
     <div class="list">
       <p v-if="!filtered.length" class="empty">暂无评论——开启评论模式后在原型或文档上评论</p>
       <section v-for="g in groups" :key="g.key" class="group">
-        <h4 class="group-title" data-testid="comment-group-title">{{ g.title }}</h4>
-        <div v-for="loc in g.locs" :key="loc.key" class="loc" :data-lock="loc.key">
-          <!-- 位置行（多条时显示 ×N 合并角标，点开折叠） -->
-          <div
-            class="loc-head"
-            :class="{ multi: loc.items.length > 1, open: expanded.has(loc.key) }"
-            data-testid="comment-loc"
-            @click="loc.items.length > 1 && toggleExpand(loc.key)"
-          >
-            <code class="loc-label">{{ loc.label }}</code>
-            <span v-if="loc.items.length > 1" class="loc-count" data-testid="loc-count">
-              ×{{ loc.items.length }}
-            </span>
-            <span v-else class="loc-single">1 条</span>
-            <span v-if="loc.items.length > 1" class="loc-hint">
-              {{ expanded.has(loc.key) ? '收起' : '展开' }}
-            </span>
-          </div>
-          <template v-if="loc.items.length === 1 || expanded.has(loc.key)">
+        <!-- 页面级标题（可折叠：上一级收起展开） -->
+        <div class="group-head" :class="{ collapsed: collapsedGroups.has(g.key) }" @click="toggleGroup(g.key)">
+          <span class="group-title" data-testid="comment-group-title">{{ g.title }}</span>
+          <span class="group-cnt">{{ groupItemCount(g) }} 条</span>
+          <span class="group-hint">{{ collapsedGroups.has(g.key) ? '展开' : '收起' }}</span>
+        </div>
+        <template v-if="!collapsedGroups.has(g.key)">
+          <div v-for="loc in g.locs" :key="loc.key" class="loc" :data-lock="loc.key">
+            <!-- 元素/段落位置行（多条合并角标，可折叠；默认展开） -->
+            <div
+              class="loc-head"
+              :class="{ multi: loc.items.length > 1, collapsed: collapsedLocs.has(loc.key) }"
+              data-testid="comment-loc"
+              @click="loc.items.length > 1 && toggleLoc(loc.key)"
+            >
+              <code class="loc-label">{{ loc.label }}</code>
+              <span v-if="loc.items.length > 1" class="loc-count" data-testid="loc-count">
+                ×{{ loc.items.length }}
+              </span>
+              <span v-else class="loc-single">1 条</span>
+              <span v-if="loc.items.length > 1" class="loc-hint">
+                {{ collapsedLocs.has(loc.key) ? '展开' : '收起' }}
+              </span>
+            </div>
+            <template v-if="loc.items.length === 1 || !collapsedLocs.has(loc.key)">
             <article
               v-for="c in loc.items"
               :key="c.comment_id"
@@ -486,6 +515,7 @@ watch(
             </article>
           </template>
         </div>
+        </template>
       </section>
     </div>
 
@@ -549,20 +579,44 @@ watch(
   border-left: 1px solid #d8dde4;
   background: #fff;
 }
-.bar {
+/* 标题栏（与原型/PRD pane-head 同款样式） */
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: #fafbfc;
+  border-bottom: 1px solid #e6e8ec;
+  font-size: 13px;
+  color: #666;
+  flex-shrink: 0;
+}
+.drawer-head .head-title { font-weight: 600; color: #24292f; }
+.drawer-head .head-selected { color: #2b5cff; font-size: 12px; }
+
+/* 筛选行：宿主 + 状态 */
+.drawer-filter {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 6px 14px;
+  padding: 6px 12px;
   border-bottom: 1px solid #eef0f3;
   font-size: 12px;
   color: #57606a;
   flex-shrink: 0;
 }
-.bar-title { font-size: 13px; font-weight: 600; color: #24292f; }
 .f { display: inline-flex; align-items: center; gap: 4px; }
 .f select { border: 1px solid #d9dce1; border-radius: 4px; padding: 1px 4px; font-size: 12px; }
-.batch { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+
+/* 按钮行：四个批量操作（创建者） */
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #eef0f3;
+  flex-shrink: 0;
+}
 .op {
   border: 1px solid #d9dce1;
   border-radius: 4px;
@@ -584,12 +638,22 @@ watch(
 .list { flex: 1; overflow-y: auto; padding: 8px 14px; user-select: none; }
 .empty { color: #999; font-size: 12px; padding: 12px 0; }
 .group { margin-bottom: 10px; }
-.group-title {
+/* 页面级标题（可折叠） */
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
   color: #2b5cff;
   margin: 6px 0 4px;
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
 }
+.group-head:hover { color: #1e4fd8; }
+.group-title { font-size: 12px; color: #2b5cff; font-weight: 600; }
+.group-cnt { color: #999; font-size: 11px; font-weight: 400; }
+.group-hint { color: #2b5cff; font-size: 11px; font-weight: 400; margin-left: auto; }
 .loc { margin-bottom: 4px; }
 /* focusKey 定位高亮（文档角标点击进来时 2s） */
 .loc.loc-focus {
@@ -610,6 +674,7 @@ watch(
 }
 .loc-head.multi { cursor: pointer; }
 .loc-head.multi:hover { background: #eef2f8; }
+.loc-head.multi.collapsed { opacity: 0.75; }
 .loc-label { color: #57606a; font-size: 11px; }
 .loc-count {
   background: #e5484d;
