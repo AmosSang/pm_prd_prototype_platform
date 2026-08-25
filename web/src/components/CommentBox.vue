@@ -176,13 +176,24 @@ function onSubmit() {
 </template>
 
 <style scoped>
+/* T8.3 修复：悬浮窗（fixed）——旧版内嵌在原型 pane 文档流里，出现时把
+   iframe 挤窄导致原型视口变形（vh 类布局随之错位）；悬浮后不占布局，
+   原型区尺寸恒定。定位右下：原型 pane 在左半屏，换目标（再点原型元素）
+   不会被窗遮挡；PRD 侧入口点击均发生在窗出现之前，不受影响。 */
 .comment-box {
-  flex-shrink: 0;
-  border-top: 1px solid #e6e8ec;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 480px;
+  max-width: calc(100vw - 48px);
+  z-index: 100;
+  border: 1px solid #d8e0f0;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(20, 40, 90, 0.16);
   background: #fbfcfe;
-  max-height: 300px;
+  max-height: min(60vh, 480px);
   overflow-y: auto;
-  padding: 8px 12px;
+  padding: 10px 14px;
   font-size: 12px;
 }
 .cp-title {

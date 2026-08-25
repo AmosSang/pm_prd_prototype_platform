@@ -150,6 +150,34 @@ async function disableCommentMode(page: Page) {
 }
 
 test.describe('T4.1 评论模式元素采集', () => {
+  test('评论框悬浮：出现后原型 iframe 尺寸不变（不挤压不变形）', async ({ page }) => {
+    // 用户报障修复回归：旧版评论框内嵌在原型 pane 文档流里，出现时把
+    // iframe 挤窄 → 原型视口变形。悬浮（fixed）后不占布局，尺寸恒定。
+    const protoFrame = await openViewer(page)
+    const iframe = page.getByTestId('viewer-proto-frame')
+    const before = await iframe.boundingBox()
+    expect(before).toBeTruthy()
+
+    await enableCommentMode(page)
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+
+    const during = await iframe.boundingBox()
+    expect(during!.width, '评论框出现后 iframe 宽度不应变化').toBe(before!.width)
+    expect(during!.height, '评论框出现后 iframe 高度不应变化').toBe(before!.height)
+
+    // 悬浮窗在视口内（fixed 左下定位）
+    const box = await page.getByTestId('comment-box').boundingBox()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.y).toBeGreaterThanOrEqual(0)
+
+    // 关闭（关评论模式联动清面板）后 iframe 仍不变
+    await disableCommentMode(page)
+    const after = await iframe.boundingBox()
+    expect(after!.width).toBe(before!.width)
+    expect(after!.height).toBe(before!.height)
+  })
+
   test('点锚点元素 → payload 字段齐全（核心验收）', async ({ page }) => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)

@@ -84,7 +84,21 @@
    * 内容偏 (+16,+20)），红框坐标按真实文档算 → 相对偏移。
    * 修正：onCloneNode 把克隆 body 的 margin/width/height 写回真实计算值
    * （onCloneNode 在 applyCssStyleWithOptions 之后执行，important 可覆盖）。
+   *
+   * 背景底色（T8.3 修复）：克隆根是 body——背景常设在 html 上（深色主题
+   * 典型形态），html 层背景不进克隆，画布若硬编码白色会「元素完整但丢
+   * 底色」；pageBackgroundColor() 取 html/body 第一个非透明背景色做画布
+   * 背景，body 透明（背景在 html）时正好铺满，html 也透明时兜底白。
    */
+  function pageBackgroundColor() {
+    var transparent = /^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$|^transparent$/i
+    var htmlBg = window.getComputedStyle(document.documentElement).backgroundColor
+    var bodyBg = window.getComputedStyle(document.body).backgroundColor
+    if (!transparent.test(htmlBg)) return htmlBg
+    if (!transparent.test(bodyBg)) return bodyBg
+    return '#ffffff'
+  }
+
   function captureFullPage(targetEl) {
     return loadScreenshotLib().then(function (mod) {
       var doc = document.documentElement
@@ -95,7 +109,7 @@
           width: fullWidth,
           height: fullHeight,
           scale: 1,
-          backgroundColor: '#ffffff',
+          backgroundColor: pageBackgroundColor(),
           autoDestruct: false,
         })
         .then(function (context) {
