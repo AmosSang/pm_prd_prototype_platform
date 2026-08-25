@@ -344,3 +344,5 @@ server {
 - [ ] `client_max_body_size` ≥ 后端 `MAX_CONTENT_LENGTH`（上传原型 zip）
 - [ ] `make check` 与 `make smoke` 全绿
 - [ ] 生产用 `gunicorn`，不要用 dev server
+
+**排查：查看器原型区一直「加载中…」**：该指示由 bridge 在原型 `window.load` 后上报 `READY` 驱动。若长时间停在加载且刷新不恢复，先看浏览器 Network 是否有 `/bridge.js` 请求非 200（常见：Nginx 未反代 `/bridge.js`、`/vendor/`），或 Console 有报错。Viewer 已内置 READY 看门狗：8s 未就绪自动重载 iframe（上限 3 次），仍失败则显示红色「连接异常，点击重试」。
