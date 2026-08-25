@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError } from '../api'
+import { currentUser } from '../auth'
 import {
   createProject,
   deleteProject,
@@ -184,10 +185,22 @@ onMounted(async () => {
           <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
             打开分屏查看器 →
           </router-link>
+          <!-- T 增强：上传仅创建者；删除 创建者/超管 均可 -->
           <span v-if="p.is_creator" class="owner-actions">
             <el-button size="small" :data-testid="`upload-${p.project_id}`" @click="openUpload(p)">
               上传内容
             </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :data-testid="`del-${p.project_id}`"
+              @click="onDelete(p)"
+            >
+              删除
+            </el-button>
+          </span>
+          <span v-else-if="currentUser?.is_admin" class="owner-actions">
             <el-button
               size="small"
               type="danger"
