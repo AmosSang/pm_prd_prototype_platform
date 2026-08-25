@@ -57,6 +57,64 @@ test.describe('T1.2 截图链路', () => {
     expect(buf[3]).toBe(0x47)
   })
 
+  test('截图保留页面背景底色（背景设在 html 上，用户报障场景）', async ({ page }) => {
+    // 复刻报障形态：视觉底色来自 html（深色），body 透明——
+    // 旧版画布硬编码白底 + 克隆根是 body（html 层背景不进克隆）
+    // → 元素完整但底色丢失。修复后画布底色取 html/body 第一个非透明背景。
+    await expect(page.getByText('READY（page=')).toBeVisible({ timeout: 10_000 })
+    const protoFrame = page.frameLocator('[data-testid="proto-frame"]')
+    const DARK = [26, 26, 46] // rgb(26,26,46)
+
+    await protoFrame.locator('html').evaluate((el: HTMLElement) => {
+      el.style.backgroundColor = 'rgb(26,26,46)'
+      document.body.style.backgroundColor = 'transparent' // 覆盖 fixture 的 #f5f6f8
+    })
+    try {
+      await page.click('button.shot')
+      const img = page.locator('[data-testid="shot-image"]')
+      await expect(img).toBeVisible({ timeout: 20_000 })
+      const src = await img.getAttribute('src')
+      const res = await page.request.get(src!)
+      expect(res.status()).toBe(200)
+      const b64 = Buffer.from(await res.body()).toString('base64')
+
+      // 解码 PNG，取四角像素（margin/空白区最外缘 = 画布底色）
+      const corners = await page.evaluate(async (b64str: string) => {
+        const bin = atob(b64str)
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }))
+        const c = document.createElement('canvas')
+        c.width = bmp.width
+        c.height = bmp.height
+        const g = c.getContext('2d')!
+        g.drawImage(bmp, 0, 0)
+        const d = g.getImageData(0, 0, c.width, c.height).data
+        const px = (x: number, y: number) => {
+          const i = (y * c.width + x) * 4
+          return [d[i], d[i + 1], d[i + 2]]
+        }
+        return {
+          tl: px(2, 2),
+          tr: px(c.width - 3, 2),
+          bl: px(2, c.height - 3),
+          br: px(c.width - 3, c.height - 3),
+        }
+      }, b64)
+
+      for (const [name, [r, g, b]] of Object.entries(corners)) {
+        expect(Math.abs(r - DARK[0]), `角[${name}] R=${r} 应为深色底`).toBeLessThanOrEqual(8)
+        expect(Math.abs(g - DARK[1]), `角[${name}] G=${g} 应为深色底`).toBeLessThanOrEqual(8)
+        expect(Math.abs(b - DARK[2]), `角[${name}] B=${b} 应为深色底`).toBeLessThanOrEqual(8)
+      }
+    } finally {
+      await protoFrame.locator('html').evaluate((el: HTMLElement) => {
+        el.style.backgroundColor = ''
+        document.body.style.backgroundColor = ''
+      })
+    }
+  })
+
   test('红框对齐：红框精确套住目标元素（含自定义 margin 场景）', async ({ page }) => {
     // 思路（红框对齐的产品语义断言）：
     // 染色元素（绿）与后端画的红框都渲染在同一张 PNG 上：
