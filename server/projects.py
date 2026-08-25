@@ -139,11 +139,22 @@ def _require_creator(p: Project):
     return None
 
 
+def _is_junk_entry(name: str) -> bool:
+    """macOS Finder 压缩产物垃圾条目：__MACOSX/ 资源目录、.DS_Store、
+    ._xxx 资源 fork（AppleDouble）。这些不是原型内容，直接跳过不解压。"""
+    parts = name.split("/")
+    if parts[0] == "__MACOSX":
+        return True
+    base = parts[-1]
+    return base == ".DS_Store" or base.startswith("._")
+
+
 def _safe_unzip(data: bytes, dest: str) -> None:
     """安全解压（AGENTS.md 硬规则 7）：zip-slip 拒绝 + 软链拒绝 + 限额。
 
     逐条目 realpath 校验目标在 dest 内——路径穿越条目与软链条目直接拒绝
     （不是净化）；校验全过才解压（防解压炸弹：超限在写盘前拦截）。
+    macOS 打包垃圾条目（__MACOSX/.DS_Store/._*）跳过不解压。
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -159,13 +170,17 @@ def _safe_unzip(data: bytes, dest: str) -> None:
 
     dest_real = os.path.realpath(dest)
     for info in entries:
+        if _is_junk_entry(info.filename):
+            continue
         # 软链条目拒绝（Unix 属性高 16 位 = 软链标记）：解压后可能指向任意路径
         if (info.external_attr >> 16) & 0o170000 == 0o120000:
             raise ValueError(f"压缩包含软链条目：{info.filename}")
         target = os.path.realpath(os.path.join(dest, *info.filename.split("/")))
         if target != dest_real and not target.startswith(dest_real + os.sep):
             raise ValueError(f"压缩包含路径穿越条目：{info.filename}")
-    zf.extractall(dest)
+    for info in entries:
+        if not _is_junk_entry(info.filename):
+            zf.extract(info, dest)
 
 
 def _top_has_html(d: str) -> bool:
@@ -179,12 +194,18 @@ def _top_has_html(d: str) -> bool:
 
 def _descend_unique_child(dir_root: str) -> str:
     """T8.2 智能下钻：zip 根顶层无 html 时进入唯一子目录一层（产品常见
-    打包形态「dist/index.html」构建产物壳）；子目录不唯一或子树无 html
-    则原样返回（由调用方按顶层无 html 报错）。
+    打包形态「dist/index.html」「prototype/index.html」）；子目录不唯一
+    或子树无 html 则原样返回（由调用方按顶层无 html 报错）。
+
+    「唯一」按可见内容目录计——点开头目录（.git 等）不参与计数，
+    macOS 垃圾条目已在解压时跳过（__MACOSX/.DS_Store/._* 不会落盘）。
     """
     if _top_has_html(dir_root):
         return dir_root
-    children = [c for c in os.listdir(dir_root) if os.path.isdir(os.path.join(dir_root, c))]
+    children = [
+        c for c in os.listdir(dir_root)
+        if os.path.isdir(os.path.join(dir_root, c)) and not c.startswith(".")
+    ]
     if len(children) == 1:
         child = os.path.join(dir_root, children[0])
         for _dp, _dn, fns in os.walk(child):

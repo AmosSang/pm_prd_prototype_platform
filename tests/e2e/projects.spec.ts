@@ -110,6 +110,34 @@ test.describe('T8.2 内容上传（创建者专属）', () => {
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
   })
 
+  test('macOS Finder 压缩包：__MACOSX/.DS_Store 垃圾不干扰下钻（用户报障场景）', async ({ page }) => {
+    const card = page.locator('.card').filter({ hasText: proj.project_id })
+    await card.getByTestId(`upload-${proj.project_id}`).click()
+
+    // Finder「压缩」产物的真实形态：__MACOSX 资源目录 + .DS_Store + ._ 资源 fork
+    await page.getByTestId('proto-file').setInputFiles({
+      name: '原型.zip',
+      mimeType: 'application/zip',
+      buffer: buildZip({
+        'prototype/': '',
+        'prototype/index.html':
+          '<html><body><main data-pa="page-login">Mac 压缩原型</main></body></html>',
+        'prototype/.DS_Store': 'junk',
+        '__MACOSX/': '',
+        '__MACOSX/prototype/': '',
+        '__MACOSX/prototype/._index.html': 'resource-fork junk',
+        '.DS_Store': 'junk',
+      }),
+    })
+    await expect(page.getByText('原型上传成功')).toBeVisible({ timeout: 15_000 })
+    await page.keyboard.press('Escape')
+
+    // 下钻 prototype/ 壳成功（垃圾被忽略，唯一内容子目录判定不受干扰）
+    await card.getByTestId('open-project').click()
+    await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
+    await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
+  })
+
   test('错误提示：非 zip 文件前端拦截；无 html 包后端拒绝（中文提示）', async ({ page }) => {
     const card = page.locator('.card').filter({ hasText: proj.project_id })
     await card.getByTestId(`upload-${proj.project_id}`).click()
