@@ -187,57 +187,31 @@ test.describe('T4.1 评论模式元素采集', () => {
     await account.hover()
     await expect(account).toHaveClass(/pp-comment-hover/)
 
-    // 点击采集 → 宿主面板出现，逐字段断言
+    // 点击采集 → 宿主面板出现（T8.6：弹窗不再展示 payload 属性摘要，
+    // payload 正确性由提交后评论 JSON 文件断言兜底，见 T4.2）
     await account.click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('dom')
-    await expect(page.getByTestId('payload-page')).toHaveText('index.html')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('login-account')
-    await expect(page.getByTestId('payload-nearest')).toHaveText('login-form')
-    // 目标自身带 data-pa 时 cssPathOf 短路为属性选择器（T3.1 既有逻辑）
-    await expect(page.getByTestId('payload-css-path')).toHaveText('[data-pa="login-account"]')
-    await expect(page.getByTestId('payload-text')).toHaveText('账号')
-    await expect(page.getByTestId('payload-modal-open')).toHaveText('false')
-    await expect(page.getByTestId('payload-viewport')).toHaveText(/^\d+x\d+$/)
-    await expect(page.getByTestId('payload-scroll-y')).toHaveText('0')
-    await expect(page.getByTestId('payload-route')).toHaveText('index.html')
-    // outer_html：目标 + 祖先上下文（在 <details> 内，textContent 可断言）
-    await expect(page.getByTestId('payload-outer-html')).toContainText('data-pa="login-account"')
-    await expect(page.getByTestId('payload-outer-html')).toContainText('data-pa="login-form"')
 
-    // 滚动后采集另一锚点 → scroll_y 反映真实滚动位置。
-    // click 落点在 section 内 h2 上（无 data-pa）→ anchor 空、nearest 命中
-    // section 锚点——顺带覆盖「点锚点容器内部子元素」的采集语义
+    // 滚动后采集另一锚点 → 评论框仍打开（换目标可继续评论）
     const extra = protoFrame.locator('[data-pa="page-extra"]')
     await extra.scrollIntoViewIfNeeded()
     await extra.click()
-    await expect(page.getByTestId('payload-anchor')).toHaveText('（无）')
-    await expect(page.getByTestId('payload-nearest')).toHaveText('page-extra')
-    await expect(page.getByTestId('payload-scroll-y')).toHaveText(/^[1-9]\d*$/)
+    await expect(page.getByTestId('comment-box')).toBeVisible()
   })
 
-  test('点非锚点元素 → anchor_id 空 + 最近祖先锚点命中', async ({ page }) => {
+  test('点非锚点元素 → 弹窗打开（评论模式拦截采集）', async ({ page }) => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
     await protoFrame.locator('h2').first().click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('dom')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('（无）')
-    await expect(page.getByTestId('payload-nearest')).toHaveText('page-login')
-    await expect(page.getByTestId('payload-text')).toHaveText('登录页')
   })
 
-  test('点 body 空白区 → 页面评论（target_type=page）', async ({ page }) => {
+  test('点 body 空白区 → 弹窗打开（页面评论）', async ({ page }) => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
     // body padding 区（fixture 设 24px 边距）落点是 body 本身
     await protoFrame.locator('body').click({ position: { x: 5, y: 5 } })
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('page')
-    await expect(page.getByTestId('payload-page')).toHaveText('index.html')
-    await expect(page.getByTestId('payload-css-path')).toHaveText('body')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('（无）')
-    await expect(page.getByTestId('payload-nearest')).toHaveText('（无）')
   })
 
   test('评论模式点击拦截：原型自身交互不触发', async ({ page }) => {
@@ -249,11 +223,10 @@ test.describe('T4.1 评论模式元素采集', () => {
     await enableCommentMode(page)
     await protoFrame.locator('#submit-btn').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-nearest')).toHaveText('login-form')
     await expect(protoFrame.locator('#submit-marker')).toHaveCount(1)
   })
 
-  test('modal_open 检测：弹窗打开后采集 interaction_state', async ({ page }) => {
+  test('modal_open 检测：弹窗打开后点按钮拦截且弹窗不关闭', async ({ page }) => {
     const protoFrame = await openViewer(page)
     // 切到弹窗页
     await page.getByTestId('proto-select').click()
@@ -264,13 +237,10 @@ test.describe('T4.1 评论模式元素采集', () => {
     await protoFrame.locator('#open-modal').click()
     await expect(protoFrame.locator('#modal-mask')).toHaveClass(/open/)
 
-    // 开启评论模式后点弹窗内按钮 → modal_open=true 且拦截（弹窗不关闭）
+    // 开启评论模式后点弹窗内按钮 → 拦截（弹窗不关闭）+ 评论框打开
     await enableCommentMode(page)
     await protoFrame.locator('[data-pa="deregister-cancel"]').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-modal-open')).toHaveText('true')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('deregister-cancel')
-    await expect(page.getByTestId('payload-page')).toHaveText('pages/modal.html')
     await expect(protoFrame.locator('#modal-mask')).toHaveClass(/open/)
   })
 
@@ -298,8 +268,6 @@ test.describe('T4.1 评论模式元素采集', () => {
     await expect(protoFrame.locator('html')).toHaveClass(/pp-comment-mode/, { timeout: 5_000 })
     await protoFrame.locator('[data-pa="settings-profile-edit"]').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-page')).toHaveText('pages/modal.html')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('settings-profile-edit')
   })
 
   test('ROUTE_CHANGE：SPA hash 变化上报宿主', async ({ page }) => {
@@ -400,9 +368,6 @@ test.describe('T4.2 评论提交链路', () => {
 
     await page.getByTestId('comment-page-btn').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('page')
-    await expect(page.getByTestId('payload-page')).toHaveText('index.html')
-    await expect(page.getByTestId('payload-css-path')).toHaveText('body')
 
     const data = await submitAndWait(page, '本页首屏加载偏慢，需要骨架屏')
     const cid: string = data.comment_id
@@ -430,8 +395,6 @@ test.describe('T4.2 评论提交链路', () => {
     await page.mouse.click(box.x + box.width - 40, box.y + 8)
 
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('doc_block')
-    await expect(page.getByTestId('payload-anchor')).toHaveText('login-account')
 
     const data = await submitAndWait(page, '账号输入需要补充支持邮箱登录的说明')
     const cid: string = data.comment_id
@@ -462,10 +425,6 @@ test.describe('T4.2 评论提交链路', () => {
     await page.mouse.click(box.x + box.width - 40, box.y + 8)
 
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await expect(page.getByTestId('payload-target-type')).toHaveText('doc_block')
-    // 无锚点：doc_anchor_id 空标记 + doc_path（标题链）展示
-    await expect(page.getByTestId('payload-anchor')).toHaveText('（无锚点，指纹定位）')
-    await expect(page.getByTestId('payload-doc-path')).toHaveText('5.4 通用说明')
 
     const data = await submitAndWait(page, '这段的通用说明需要补充适用范围')
     const cid: string = data.comment_id
@@ -955,5 +914,52 @@ test.describe('T8.5 评论抽屉增强', () => {
     await expect(docItem).toBeVisible()
     await expect(page.locator('.group-title', { hasText: 'PRD 文档' })).toBeVisible()
     await expect(docItem.locator('[data-testid="doc-excerpt"]')).toBeVisible()
+  })
+})
+
+// ═══════════════════ T8.6 弹窗精简 + 右侧抽屉三栏 ═══════════════════
+
+test.describe('T8.6 弹窗精简与抽屉右侧化', () => {
+  test('评论弹窗只显示内容/优先级/范围（无 payload 属性摘要）', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await expect(page.getByTestId('comment-box')).toBeVisible()
+    // 只保留内容/优先级/范围
+    await expect(page.getByTestId('comment-content')).toBeVisible()
+    await expect(page.getByTestId('comment-priority')).toBeVisible()
+    await expect(page.getByTestId('comment-scope')).toBeVisible()
+    // 不再展示自动填充属性摘要
+    await expect(page.getByTestId('payload-target-type')).toHaveCount(0)
+    await expect(page.getByTestId('payload-outer-html')).toHaveCount(0)
+  })
+
+  test('评论抽屉从底部改为右侧栏，三栏可拖拽调宽', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    await submitAndWait(page, '右侧抽屉测试')
+    await page.getByTestId('comment-done').click()
+
+    await page.getByTestId('drawer-toggle').click()
+    const drawer = page.getByTestId('comment-drawer')
+    await expect(drawer).toBeVisible()
+
+    // 抽屉在容器右半侧（x 超过 v-body 中心）
+    const container = (await page.locator('.v-body').boundingBox())!
+    const dbox = (await drawer.boundingBox())!
+    expect(dbox.x).toBeGreaterThan(container.x + container.width / 2)
+
+    // 拖拽 divider-drawer（向左 = 加宽右侧评论栏）
+    const div = page.getByTestId('divider-drawer')
+    await expect(div).toBeVisible()
+    const before = (await drawer.boundingBox())!.width
+    const db = (await div.boundingBox())!
+    await page.mouse.move(db.x + 3, db.y + 60)
+    await page.mouse.down()
+    await page.mouse.move(db.x - 80, db.y + 60, { steps: 8 })
+    await page.mouse.up()
+    const after = (await drawer.boundingBox())!.width
+    expect(after, '向左拖拽后评论栏应变宽').toBeGreaterThan(before + 20)
   })
 })

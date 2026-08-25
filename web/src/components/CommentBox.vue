@@ -84,46 +84,7 @@ function onSubmit() {
     <template v-else>
       <div class="cp-title">发表评论</div>
 
-      <!-- 目标摘要（T4.1 采集字段，testid 保留） -->
-      <div class="cp-grid">
-        <span class="k">target_type</span>
-        <b data-testid="payload-target-type">{{ payload.target_type }}</b>
-        <template v-if="payload.target_type === 'doc_block'">
-          <span class="k">doc_anchor_id</span>
-          <b data-testid="payload-anchor">{{ payload.doc_anchor_id || '（无锚点，指纹定位）' }}</b>
-          <span class="k">doc_path</span>
-          <b data-testid="payload-doc-path">{{ payload.doc_path || '（文档顶部）' }}</b>
-          <span class="k">doc_excerpt</span>
-          <b data-testid="payload-text">{{ payload.doc_excerpt || '（无文本）' }}</b>
-        </template>
-        <template v-else>
-          <span class="k">prototype_page</span>
-          <b data-testid="payload-page">{{ payload.prototype_page }}</b>
-          <span class="k">anchor_id</span>
-          <b data-testid="payload-anchor">{{ payload.anchor_id || '（无）' }}</b>
-          <span class="k">nearest_anchor_id</span>
-          <b data-testid="payload-nearest">{{ payload.nearest_anchor_id || '（无）' }}</b>
-          <span class="k">css_path</span>
-          <b class="mono" data-testid="payload-css-path">{{ payload.css_path }}</b>
-          <span class="k">text_excerpt</span>
-          <b data-testid="payload-text">{{ payload.text_excerpt || '（无文本）' }}</b>
-          <span class="k">modal_open</span>
-          <b data-testid="payload-modal-open">{{ payload.interaction_state.modal_open }}</b>
-          <span class="k">viewport</span>
-          <b data-testid="payload-viewport">{{ payload.interaction_state.viewport }}</b>
-          <span class="k">scroll_y</span>
-          <b data-testid="payload-scroll-y">{{ payload.interaction_state.scroll_y }}</b>
-          <span class="k">route</span>
-          <b class="mono" data-testid="payload-route">{{ payload.interaction_state.route }}</b>
-          <span class="k">outer_html</span>
-          <details class="cp-details">
-            <summary>展开（目标 + 祖先上下文）</summary>
-            <code data-testid="payload-outer-html">{{ payload.outer_html }}</code>
-          </details>
-        </template>
-      </div>
-
-      <!-- 表单 -->
+      <!-- 表单（T8.6 优化：去掉自动填充的 payload 属性摘要，只留内容/优先级/范围） -->
       <div class="cb-form">
         <textarea
           v-model="content"

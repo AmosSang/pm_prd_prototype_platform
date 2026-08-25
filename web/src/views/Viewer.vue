@@ -759,24 +759,33 @@ const reconHasIssue = computed(() => {
   )
 })
 
-// ───────────────────────── 分割条拖动 ─────────────────────────
-// 左侧面板宽度百分比；pointer 捕获 + 全局 move/up，拖出条外也持续跟随。
-const leftPct = ref(50)
-const dragging = ref(false)
+// ───────────────────────── 分割条拖动（T8.6 三栏：原型|文档|评论） ─────────────────────────
+// 两把分割条：proto（原型|文档）+ drawer（文档|评论）。三栏宽度百分比，
+// pointer 捕获 + 全局 move/up。评论抽屉关闭时 drawerPct 不参与，文档占剩余。
+const protoPct = ref(50)
+const drawerPct = ref(28)
+const dragging = ref<'proto' | 'drawer' | null>(null)
 const containerEl = ref<HTMLElement | null>(null)
 
-function onDividerDown(e: PointerEvent) {
-  dragging.value = true
-  ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+/** 文档（中间栏）宽度：100 - 原型 - 评论（抽屉关闭时评论占位 0，文档填满剩余）。 */
+const prdPct = computed(() => Math.max(15, 100 - protoPct.value - (drawerOpen.value ? drawerPct.value : 0)))
+
+function onDividerDown(e: PointerEvent, kind: 'proto' | 'drawer') {
+  dragging.value = kind
+  // pointer 捕获：拖出分割条后仍持续收到 pointermove（不丢拖拽）
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
 }
 function onDividerMove(e: PointerEvent) {
   if (!dragging.value || !containerEl.value) return
   const rect = containerEl.value.getBoundingClientRect()
-  const pct = ((e.clientX - rect.left) / rect.width) * 100
-  leftPct.value = Math.min(80, Math.max(20, pct))
+  if (dragging.value === 'proto') {
+    protoPct.value = Math.min(70, Math.max(15, ((e.clientX - rect.left) / rect.width) * 100))
+  } else if (dragging.value === 'drawer') {
+    drawerPct.value = Math.min(45, Math.max(15, ((rect.right - e.clientX) / rect.width) * 100))
+  }
 }
 function onDividerUp() {
-  dragging.value = false
+  dragging.value = null
 }
 
 /** 按 slug 反查项目并加载 overview，同步重置入口/文档/开关/评论（T8.2 上传后复用）。 */
@@ -906,7 +915,7 @@ onBeforeUnmount(() => {
 
     <div class="v-body" ref="containerEl">
       <!-- 左：原型 -->
-      <section class="pane proto" :style="{ width: leftPct + '%' }">
+      <section class="pane proto" :style="{ width: protoPct + '%' }">
         <div class="pane-head">
           <span>原型</span>
           <el-select
@@ -961,19 +970,19 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <!-- 分割条 -->
+      <!-- 分割条（原型 | 文档） -->
       <div
         class="divider"
-        :class="{ dragging }"
+        :class="{ dragging: dragging === 'proto' }"
         data-testid="divider"
-        @pointerdown="onDividerDown"
+        @pointerdown="onDividerDown($event, 'proto')"
         @pointermove="onDividerMove"
         @pointerup="onDividerUp"
         @pointercancel="onDividerUp"
       />
 
-      <!-- 右：PRD -->
-      <section class="pane prd">
+      <!-- 中：PRD -->
+      <section class="pane prd" :style="{ width: prdPct + '%' }">
         <div class="pane-head">
           <span>PRD 文档</span>
           <el-select
@@ -1016,20 +1025,33 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </section>
-    </div>
 
-    <!-- T4.4 评论列表抽屉（产品方案 §4.4 底部横条） -->
-    <CommentDrawer
-      v-if="drawerOpen"
-      :project-id="overview.project.id"
-      :comments="comments"
-      :current-user-email="currentUser?.email || ''"
-      :focus-key="drawerFocusKey"
-      :commentable="commentable"
-      :is-creator="overview.project.is_creator"
-      @refresh="refreshComments"
-      @locate="locateComment"
-    />
+      <!-- 分割条（文档 | 评论，抽屉打开才显示） -->
+      <div
+        v-if="drawerOpen"
+        class="divider"
+        :class="{ dragging: dragging === 'drawer' }"
+        data-testid="divider-drawer"
+        @pointerdown="onDividerDown($event, 'drawer')"
+        @pointermove="onDividerMove"
+        @pointerup="onDividerUp"
+        @pointercancel="onDividerUp"
+      />
+
+      <!-- 右：评论抽屉（T8.6 从底部横条改为右侧栏，宽度可拖） -->
+      <section v-if="drawerOpen" class="pane comments" :style="{ width: drawerPct + '%' }">
+        <CommentDrawer
+          :project-id="overview.project.id"
+          :comments="comments"
+          :current-user-email="currentUser?.email || ''"
+          :focus-key="drawerFocusKey"
+          :commentable="commentable"
+          :is-creator="overview.project.is_creator"
+          @refresh="refreshComments"
+          @locate="locateComment"
+        />
+      </section>
+    </div>
   </main>
 
   <main v-else class="viewer loading">
@@ -1231,6 +1253,8 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
 }
+/* T8.6 右侧评论栏 */
+.pane.comments { background: #fff; }
 .pane-head {
   display: flex;
   align-items: center;
