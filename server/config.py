@@ -1,7 +1,36 @@
-"""配置：环境变量驱动，开发环境提供默认值。"""
+"""配置：环境变量驱动，开发环境提供默认值。
+
+支持 `platform/.env` 自动加载（python app.py 启动不会走 Flask CLI 的 dotenv）。
+优先级：已存在的进程环境变量 > .env 文件（.env 不覆盖已有 export）。
+"""
 import os
 
 PLATFORM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv(path: str) -> None:
+    """最简 .env 解析：KEY=VALUE 写入 os.environ，已存在则跳过；支持 # 注释与引号包裹。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                elif " #" in value:
+                    # 非引号值：去掉行内注释（# 前）；值内含 " #" 的少见，需用引号包裹
+                    value = value.split(" #", 1)[0].strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv(os.path.join(PLATFORM_DIR, ".env"))
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(PLATFORM_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "platform.db")

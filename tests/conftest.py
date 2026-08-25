@@ -2,10 +2,22 @@
 import os
 import sys
 
+import pytest
+
 # 让 tests/ 能导入 server 包
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+@pytest.fixture(autouse=True)
+def _test_seed_off(monkeypatch):
+    """默认关闭超管种子（T2.1）：本机 .env 的 ADMIN_EMAIL 会污染临时库断言。
+
+    需要测超管种子的用例（test_users.py）会自行 monkeypatch server.models.ADMIN_EMAIL。
+    autouse 先于同 scope 的 app fixture 执行，故 create_app() 内 seed_admin() 被跳过。
+    """
+    monkeypatch.setattr("server.models.ADMIN_EMAIL", "")
 
 
 def make_local_project(projects_dir, slug: str = "cm-proj") -> str:
