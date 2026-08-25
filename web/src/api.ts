@@ -47,4 +47,42 @@ export const api = {
     request<T>(url, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: <T = any>(url: string) => request<T>(url, { method: 'DELETE' }),
   upload: <T = any>(url: string, fd: FormData) => request<T>(url, { method: 'POST', body: fd }),
+  /** 带进度回调的上传（T8.2）：fetch 无上传进度，用 XHR；错误口径与 request 一致 */
+  uploadWithProgress: <T = any>(
+    url: string,
+    fd: FormData,
+    onProgress: (percent: number) => void,
+  ): Promise<T> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', url)
+      xhr.withCredentials = true
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+      xhr.onload = () => {
+        let body: any = null
+        try {
+          body = JSON.parse(xhr.responseText)
+        } catch {
+          reject(new ApiError(`响应解析失败（${xhr.status}）`, xhr.status))
+          return
+        }
+        if (xhr.status === 401) {
+          const back = encodeURIComponent(location.pathname + location.search)
+          if (!location.pathname.startsWith('/login')) {
+            location.href = `/login?back=${back}`
+          }
+          reject(new ApiError(body?.msg || '未登录', 401))
+          return
+        }
+        if (body.code !== 0) {
+          reject(new ApiError(body.msg || `请求失败（${xhr.status}）`, body.code ?? xhr.status))
+          return
+        }
+        resolve(body.data as T)
+      }
+      xhr.onerror = () => reject(new ApiError('网络错误，上传失败', 0))
+      xhr.send(fd)
+    }),
 }

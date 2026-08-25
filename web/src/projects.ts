@@ -99,6 +99,31 @@ export function updateProject(id: number, body: { commentable: boolean }): Promi
   return api.patch<ProjectInfo>(`/api/projects/${id}`, body)
 }
 
+// ───────────────────── 内容上传与删除（T8.2，创建者专属）─────────────────────
+
+/** 上传原型 zip（带进度回调；≤100MB，安全校验与原子替换在后端）。 */
+export function uploadPrototype(
+  id: number,
+  file: File,
+  onProgress: (percent: number) => void = () => {},
+): Promise<ProjectInfo> {
+  const fd = new FormData()
+  fd.append('zip', file, file.name)
+  return api.uploadWithProgress<ProjectInfo>(`/api/projects/${id}/prototype`, fd, onProgress)
+}
+
+/** 上传 PRD markdown（≤5MB，替换 prd/ 旧文档）。 */
+export function uploadPrd(id: number, file: File): Promise<ProjectInfo> {
+  const fd = new FormData()
+  fd.append('file', file, file.name)
+  return api.upload<ProjectInfo>(`/api/projects/${id}/prd`, fd)
+}
+
+/** 删除项目（目录 + 评论 + DB；仅创建者）。 */
+export function deleteProject(id: number): Promise<{ deleted: boolean; project_id: string }> {
+  return api.delete(`/api/projects/${id}`)
+}
+
 // ───────────────────────── 评论（T4.2）─────────────────────────
 
 /** 评论 DOM 定位 payload（bridge 采集，技术方案 §2.3；schema 见 server/reviews.py） */

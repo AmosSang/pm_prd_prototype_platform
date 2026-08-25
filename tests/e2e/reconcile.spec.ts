@@ -15,6 +15,8 @@ import { createProjectWithContent, type ProjectInfo } from './helpers'
  */
 
 const PROTO = {
+  // 顶层 index.html：T8.2 上传要求 zip 根顶层有 html（否则按 dist 壳下钻剥掉 pages/）
+  'index.html': '<html><body><h2>占位</h2></body></html>',
   'pages/a.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"></head>
 <body>

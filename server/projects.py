@@ -4,8 +4,9 @@
 - POST /api/projects {name} → 创建项目（建目录 + DB 记录；creator=当前用户）
 - GET  /api/projects → 列表（含创建者信息与 is_creator 标记）
 - PATCH /api/projects/<pid> {commentable} → 可评论开关（T8.4 收权为创建者）
-- POST /api/projects/<pid>/prototype → 上传原型 zip（T8.1 最小版，仅创建者）
-- POST /api/projects/<pid>/prd → 上传 PRD markdown（T8.1 最小版，仅创建者）
+- POST /api/projects/<pid>/prototype → 上传原型 zip（安全校验 + 智能下钻；仅创建者）
+- POST /api/projects/<pid>/prd → 上传 PRD markdown（≤5MB，替换旧文档；仅创建者）
+- DELETE /api/projects/<pid> → 删除项目（目录 + 评论 + DB；仅创建者）
 - GET  /api/projects/<pid>/overview → 文档列表 + 入口原型页（T2.4）
 - GET  /api/projects/<pid>/prd?file=xx.md → markdown 原文（T2.4）
 - GET  /api/projects/<pid>/reconcile → 锚点对账明细（T3.3）
@@ -28,10 +29,10 @@ from server.config import (
     PROTO_UNZIP_MAX_FILES,
     PROTO_ZIP_MAX_BYTES,
 )
-from server.models import Project, User, utcnow_str
+from server.models import Comment, Project, User, utcnow_str
 from server.page_map import parse_repo_page_map, scan_proto_anchors
 from server.reconcile import reconcile_repo
-from server.storage import ensure_project_dirs, project_root
+from server.storage import delete_project_dirs, ensure_project_dirs, project_root
 
 bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
@@ -139,10 +140,10 @@ def _require_creator(p: Project):
 
 
 def _safe_unzip(data: bytes, dest: str) -> None:
-    """安全解压（AGENTS.md 硬规则 7）：zip-slip 拒绝 + 条目数/解压总量限额。
+    """安全解压（AGENTS.md 硬规则 7）：zip-slip 拒绝 + 软链拒绝 + 限额。
 
-    逐条目 realpath 校验目标在 dest 内——路径穿越条目直接拒绝（不是净化）；
-    校验全过才解压（防解压炸弹：超限在写盘前拦截）。
+    逐条目 realpath 校验目标在 dest 内——路径穿越条目与软链条目直接拒绝
+    （不是净化）；校验全过才解压（防解压炸弹：超限在写盘前拦截）。
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -158,18 +159,44 @@ def _safe_unzip(data: bytes, dest: str) -> None:
 
     dest_real = os.path.realpath(dest)
     for info in entries:
+        # 软链条目拒绝（Unix 属性高 16 位 = 软链标记）：解压后可能指向任意路径
+        if (info.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ValueError(f"压缩包含软链条目：{info.filename}")
         target = os.path.realpath(os.path.join(dest, *info.filename.split("/")))
         if target != dest_real and not target.startswith(dest_real + os.sep):
             raise ValueError(f"压缩包含路径穿越条目：{info.filename}")
     zf.extractall(dest)
 
 
+def _top_has_html(d: str) -> bool:
+    """目录顶层（非递归）是否有 html 页面。"""
+    return any(
+        fn.lower().endswith(".html")
+        for fn in os.listdir(d)
+        if os.path.isfile(os.path.join(d, fn))
+    )
+
+
+def _descend_unique_child(dir_root: str) -> str:
+    """T8.2 智能下钻：zip 根顶层无 html 时进入唯一子目录一层（产品常见
+    打包形态「dist/index.html」构建产物壳）；子目录不唯一或子树无 html
+    则原样返回（由调用方按顶层无 html 报错）。
+    """
+    if _top_has_html(dir_root):
+        return dir_root
+    children = [c for c in os.listdir(dir_root) if os.path.isdir(os.path.join(dir_root, c))]
+    if len(children) == 1:
+        child = os.path.join(dir_root, children[0])
+        for _dp, _dn, fns in os.walk(child):
+            if any(fn.lower().endswith(".html") for fn in fns):
+                return child
+    return dir_root
+
+
 @bp.post("/<int:pid>/prototype")
 def upload_prototype(pid: int):
-    """上传原型 zip：校验通过 → 解压临时目录 → 原子替换 prototype/，失败保留旧版本。
-
-    T8.1 最小版（E2E/脚本用）：安全校验齐全（zip-slip/条目数/总量/包大小），
-    仅创建者；T8.2 补前端上传 UI、Nginx/dev 代理 body 限额与进度提示。
+    """上传原型 zip：校验通过 → 解压临时目录 → 安全校验 → 智能下钻 →
+    原子替换 prototype/，失败保留旧版本（AGENTS.md 硬规则 7）。仅创建者。
     """
     p = Project.get_or_none(Project.id == pid)
     if not p:
@@ -200,11 +227,19 @@ def upload_prototype(pid: int):
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return _err(str(e), 400)
 
+    # 智能下钻：根顶层无 html 时进入唯一子目录一层（如 dist/index.html 打包形态）
+    content_dir = _descend_unique_child(tmp_dir)
+    if not _top_has_html(content_dir):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _err("压缩包内未找到 HTML 页面（根目录与唯一一级子目录顶层均无 html）", 400)
+
     # 原子替换：旧目录先让位，新目录就位后再清旧（中途失败仍有一份完整）
     proto_dir = os.path.join(root, "prototype")
     if os.path.isdir(proto_dir):
         os.rename(proto_dir, old_dir)
-    os.rename(tmp_dir, proto_dir)
+    os.rename(content_dir, os.path.join(root, ".prototype-new"))
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.rename(os.path.join(root, ".prototype-new"), proto_dir)
     shutil.rmtree(old_dir, ignore_errors=True)
 
     p.content_updated_at = utcnow_str()
@@ -247,6 +282,28 @@ def upload_prd(pid: int):
     p.content_updated_at = utcnow_str()
     p.save()
     return jsonify(code=0, data=_project_public(p)), 200
+
+
+@bp.delete("/<int:pid>")
+def delete_project(pid: int):
+    """删除项目（T8.2）：目录 + 评论（DB）+ 项目记录一并清除，仅创建者。
+
+    硬规则：demo 项目（fixture）不可删；目录删除失败时 DB 记录保留
+    （宁可留脏数据也不留无主目录——用户可重试）。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    deny = _require_creator(p)
+    if deny:
+        return deny
+    if p.project_id == "demo":
+        return _err("演示项目不可删除", 400)
+
+    delete_project_dirs(p.project_id)
+    Comment.delete().where(Comment.project == p.id).execute()
+    p.delete_instance()
+    return jsonify(code=0, data={"deleted": True, "project_id": p.project_id}), 200
 
 
 # ───────────────────────── T2.4 查看器数据 ─────────────────────────

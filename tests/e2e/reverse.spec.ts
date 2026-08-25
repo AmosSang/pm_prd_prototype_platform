@@ -11,6 +11,9 @@ import { createProjectWithContent, type ProjectInfo } from './helpers'
  */
 
 const PROTO = {
+  // 顶层 index.html：T8.2 上传要求 zip 根顶层有 html（否则按 dist 壳下钻剥掉 pages/）；
+  // 不带 data-pa，避免与 home.html 的 page-home 锚点重复
+  'index.html': '<html><body><h2>首页占位</h2></body></html>',
   // 登录页：form 在 150vh 之下（验证滚动）
   'pages/login.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
