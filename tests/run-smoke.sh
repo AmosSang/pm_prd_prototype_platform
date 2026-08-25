@@ -36,7 +36,8 @@ echo "[smoke] 启动后端..."
 (cd server && [ -d .venv ] || { python3 -m venv .venv; .venv/bin/pip install -q -r requirements.txt; })
 # SMTP_FAKE=1：验证码写 /tmp/ppp-fake-mailbox/（E2E 登录用）
 rm -rf /tmp/ppp-fake-mailbox
-(cd server && SMTP_FAKE=1 .venv/bin/python app.py > /tmp/ppp-smoke-server.log 2>&1) &
+# ADMIN_EMAIL：启动时种子超级管理员（name=admin，is_admin=True）——用户管理 E2E 用
+(cd server && SMTP_FAKE=1 ADMIN_EMAIL=e2e-admin@test.local .venv/bin/python app.py > /tmp/ppp-smoke-server.log 2>&1) &
 SERVER_PID=$!
 
 # 测试用户（幂等）+ 清频控残留（60s 频控会让 E2E 登录 429）
@@ -49,7 +50,7 @@ server/.venv/bin/python -m server.cli user-add perm@test.local 权限测试员 >
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" "/tmp/ppp-fake-mailbox/perm@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
 import shutil
-from server.models import Comment, Project, VerificationCode, init_tables
+from server.models import Comment, Project, User, VerificationCode, init_tables
 init_tables()
 n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local', 'perm@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
@@ -72,6 +73,9 @@ for p in e2e_projects:
     shutil.rmtree(os.path.join(PROJECTS_DIR, p.project_id), ignore_errors=True)
     p.delete_instance()
 print('[smoke] 清理 e2e 项目记录')
+# 用户管理 E2E 建的用户（um- 前缀）跨 run 清掉，避免二次 smoke create 冲突
+nu = User.delete().where(User.email.startswith('um-')).execute()
+print(f'[smoke] 清理 e2e 用户管理用户 {nu} 条')
 " || true
 
 echo "[smoke] 启动前端..."
