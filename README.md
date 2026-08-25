@@ -203,6 +203,8 @@ make dev
 | `DATA_DIR` | `{项目}/data` | 数据根目录（SQLite + projects + shots） |
 | `WEB_ORIGIN` | `http://localhost:8080` | 允许跨域的前端 origin（仅后端开发直连时用到；生产 Nginx 同域反代则无需） |
 
+> 前端（Vite）另有构建期变量 `VITE_PROTO_ORIGIN`（放 `web/.env`）：控制原型 iframe 的 origin。开发留空自动用 `http://localhost:8081`；生产 Nginx **同域反代 `/proto`**（推荐）留空自动用当前站点 origin；后端在独立 `host:port` 提供时填 `http://<host>:<PORT>`。详见 `web/.env.example`。
+
 > 163 免费邮箱配置示例（`SMTP_USE_SSL=1`、`SMTP_PORT=465`、密码填**授权码**）。更多邮箱配置见上文“注意事项”。
 
 ---

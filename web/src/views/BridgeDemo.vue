@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { PROTO_ORIGIN } from '../proto-origin'
 
-const PROTO_ORIGIN = 'http://localhost:8081'
 const DEMO_PAGE = '/proto/demo/prototype/pages/login.html'
 
 function makeNonce(): string {
