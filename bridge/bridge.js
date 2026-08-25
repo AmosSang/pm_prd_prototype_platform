@@ -28,9 +28,14 @@
   if (window.__PP_BRIDGE__) return // 幂等：防重复注入
   window.__PP_BRIDGE__ = true
 
-  // 从 URL hash 取宿主下发的 nonce
+  // 从 URL hash 取宿主下发的 nonce（兜底 1：head 早期护栏写入 window.__PP_NONCE__；
+  // 兜底 2：sessionStorage——原型内部跳转会丢 hash）
   var m = /(?:^|#)pp-nonce=([A-Za-z0-9_-]+)/.exec(window.location.hash)
   var NONCE = m ? m[1] : null
+  if (!NONCE && window.__PP_NONCE__) NONCE = String(window.__PP_NONCE__) || null
+  if (NONCE) {
+    try { window.__PP_NONCE__ = NONCE } catch (e) { /* 忽略 */ }
+  }
   // 原型内部跳转（a href / location.href 等）会丢掉 URL hash 里的 #pp-nonce，
   // 新页面 bridge 的 NONCE 变 null，发往宿主的消息（ANCHOR_CLICK 等）会被
   // nonce 校验拒绝、锚点定位失灵。用同源 sessionStorage 记住 nonce 跨页恢复

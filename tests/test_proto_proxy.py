@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.proto_proxy import PROJECT_ID, _resolve, inject_bridge
+from server.proto_proxy import BRIDGE_GUARD_TAG, PROJECT_ID, _resolve, inject_bridge
 
 
 def test_project_id_pattern():
@@ -38,12 +38,23 @@ def test_resolve_blocks_traversal(tmp_path, monkeypatch):
 
 
 def test_inject_bridge():
-    html = "<html><body><h1>hi</h1></body></html>"
+    html = "<html><head><meta charset='utf-8'></head><body><h1>hi</h1></body></html>"
     out = inject_bridge(html)
     assert '<script src="/bridge.js"></script></body>' in out
-    # 幂等：重复注入不再叠加
+    # 早期护栏注入在 <head> 后（原型脚本崩溃/改写文档时 bridge 可自愈补挂）
+    assert BRIDGE_GUARD_TAG in out
+    assert out.index(BRIDGE_GUARD_TAG) < out.index("<body>")
+    # 幂等：重复注入不再叠加（护栏与 bridge 各只一次）
     assert inject_bridge(out) == out
     # 无 </body> 兜底：追加末尾
     assert inject_bridge("<html><h1>hi</h1></html>").endswith(
         '<script src="/bridge.js"></script>'
     )
+
+
+def test_injected_guard_captures_nonce():
+    """护栏脚本含 nonce 捕获与 __PP_BRIDGE__ 幂等补挂逻辑（回归防护）。"""
+    assert "pp-nonce=([A-Za-z0-9_-]+)" in BRIDGE_GUARD_TAG
+    assert "__PP_NONCE__" in BRIDGE_GUARD_TAG
+    assert "__PP_BRIDGE__" in BRIDGE_GUARD_TAG
+    assert "data-pp-bridge" in BRIDGE_GUARD_TAG
