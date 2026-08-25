@@ -11,6 +11,8 @@
 import argparse
 import sys
 
+from peewee import IntegrityError
+
 from server.models import User, init_tables
 
 
@@ -19,7 +21,12 @@ def cmd_user_add(args):
     if User.get_or_none(User.email == email):
         print(f"已存在：{email}")
         return 1
-    User.create(email=email, name=args.name, is_admin=args.admin)
+    try:
+        User.create(email=email, name=args.name, is_admin=args.admin)
+    except IntegrityError:
+        # 并发/重复：撞唯一约束视为已存在
+        print(f"已存在：{email}")
+        return 1
     print(f"已添加：{email}（{args.name}{'，管理员' if args.admin else ''}）")
     return 0
 

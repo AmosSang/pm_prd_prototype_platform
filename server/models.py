@@ -138,17 +138,18 @@ def _migrate() -> None:
 def seed_admin() -> None:
     """按 ADMIN_EMAIL 环境变量种子超级管理员（幂等，多方启动只保证一次）。
 
-    不存在则创建（name=admin）；已存在则确保 is_admin=True。
+    用 get_or_create：多 worker 并发启动（gunicorn -w N 且未 preload）时，两个
+    worker 可能同时种同一个邮箱——get_or_create 在 INSERT 撞 UNIQUE 后会回退
+    重新查询（返回已存在行），避免 IntegrityError 崩溃。已存在则确保 is_admin=True。
     """
     if not ADMIN_EMAIL:
         return
     email = ADMIN_EMAIL.strip().lower()
     if not email:
         return
-    user = User.get_or_none(User.email == email)
-    if user:
-        if not user.is_admin:
-            user.is_admin = True
-            user.save()
-        return
-    User.create(email=email, name="admin", is_admin=True)
+    user, created = User.get_or_create(
+        email=email, defaults={"name": "admin", "is_admin": True}
+    )
+    if not created and not user.is_admin:
+        user.is_admin = True
+        user.save()

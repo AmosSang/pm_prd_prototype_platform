@@ -11,6 +11,7 @@
 已登录会话在任意 /api/ 调用时被 before_request 401 强制登出（见 app.py）。
 """
 from flask import Blueprint, jsonify, request, session
+from peewee import IntegrityError
 
 from server.models import User
 
@@ -75,7 +76,11 @@ def create_user():
         return _err("姓名必填", 400)
     if User.get_or_none(User.email == email):
         return _err("该邮箱已开通，请勿重复添加", 409)
-    u = User.create(email=email, name=name)
+    try:
+        u = User.create(email=email, name=name)
+    except IntegrityError:
+        # 并发下两请求同时建同一邮箱：先 check 后 insert 仍可能撞唯一约束
+        return _err("该邮箱已开通，请勿重复添加", 409)
     return jsonify(code=0, data=_user_public(u)), 200
 
 
