@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
+import { execSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createProjectWithContent, type ProjectInfo } from './helpers'
 
@@ -709,5 +711,82 @@ test.describe('T4.5 项目级可评论开关', () => {
     await expect(page.getByTestId('commentable-toggle')).toHaveClass(/is-checked/)
     await expect(page.getByTestId('edit-comment')).toHaveCount(1)
     await expect(page.getByTestId('batch-confirm')).not.toBeDisabled()
+  })
+})
+
+// ═══════════════════ T8.3 评论导出（仅创建者）═══════════════════
+
+/** 解导出 zip 到临时目录，返回 (dir, manifest)。 */
+function unzipExport(zipPath: string): { dir: string; manifest: Record<string, any> } {
+  const dir = path.join(os.tmpdir(), `ppp-export-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  execSync(`unzip -oq "${zipPath}" -d "${dir}"`)
+  const top = fs.readdirSync(dir).filter((n) => !n.startsWith('.')).at(0)!
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, top, 'manifest.json'), 'utf-8'))
+  return { dir, manifest }
+}
+
+test.describe('T8.3 评论导出', () => {
+  test('提交→确认→UI 导出全部→解包校验；已确认范围仅含确认条目（任务卡验收）', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 1 条 dom 评论（含截图，走真实截图链路）+ 1 条文档评论
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d1 = await submitAndWait(page, '导出验证 dom 评论')
+    await page.getByTestId('comment-done').click()
+
+    const li = page.getByTestId('prd-content').locator('li[data-pa="login-account"]')
+    const box = (await li.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+    const d2 = await submitAndWait(page, '导出验证文档评论')
+    await page.getByTestId('comment-done').click()
+
+    // 确认 d1 →「已确认待修改」（交付修改的标准范围）
+    const r = await page.request.post('/api/comments/batch-status', {
+      data: { cids: [d1.comment_id], action: 'confirm' },
+    })
+    expect(r.ok()).toBeTruthy()
+
+    // 顶栏导出（创建者工具区）：全部评论
+    await page.getByTestId('export-comments').click()
+    const dl1Promise = page.waitForEvent('download')
+    await page.getByTestId('export-option-all').click()
+    const dl1 = await dl1Promise
+    // 下载文件名：{project_id}-comments-{yyyymmdd}-{HHmm}.zip
+    expect(dl1.suggestedFilename()).toMatch(/^[\w-]+-comments-\d{8}-\d{4}\.zip$/)
+
+    const { dir, manifest } = unzipExport((await dl1.path())!)
+    expect(manifest.scope).toBe('all')
+    expect(manifest.total).toBe(2)
+    expect(manifest.project.name).toBe('评论E2E项目')
+    expect(
+      manifest.comments.map((c: Record<string, any>) => c.comment_id).sort(),
+    ).toEqual([d1.comment_id, d2.comment_id].sort())
+    // manifest 清单：dom 评论带截图，文档评论无
+    const byCid = Object.fromEntries(manifest.comments.map((c: Record<string, any>) => [c.comment_id, c]))
+    expect(byCid[d1.comment_id].has_shot).toBe(true)
+    expect(byCid[d2.comment_id].has_shot).toBe(false)
+    expect(byCid[d1.comment_id].status).toBe('已确认待修改')
+
+    // 包内文件：评论 JSON 与截图（与项目目录 reviews/ 同构）
+    const top = fs.readdirSync(dir).filter((n) => !n.startsWith('.')).at(0)!
+    const cj = JSON.parse(
+      fs.readFileSync(path.join(dir, top, 'comments', `${d1.comment_id}.json`), 'utf-8'),
+    )
+    expect(cj.content).toBe('导出验证 dom 评论')
+    expect(cj.screenshot).toBe(`shots/${d1.comment_id}.png`)
+    expect(fs.existsSync(path.join(dir, top, 'shots', `${d1.comment_id}.png`))).toBe(true)
+    expect(fs.existsSync(path.join(dir, top, 'shots', `${d2.comment_id}.png`))).toBe(false)
+
+    // 已确认待修改范围：仅 d1
+    await page.getByTestId('export-comments').click()
+    const dl2Promise = page.waitForEvent('download')
+    await page.getByTestId('export-option-confirmed').click()
+    const dl2 = await dl2Promise
+    const { manifest: m2 } = unzipExport((await dl2.path())!)
+    expect(m2.scope).toBe('confirmed')
+    expect(m2.total).toBe(1)
+    expect(m2.comments[0].comment_id).toBe(d1.comment_id)
   })
 })

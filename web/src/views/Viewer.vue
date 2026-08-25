@@ -104,6 +104,15 @@ async function onCommentableChange(on: string | number | boolean) {
   }
 }
 
+// ───────────────────────── T8.3 评论导出（仅创建者） ─────────────────────────
+// 产品方案 §4.7：全部评论（归档/周报）或所有已确认待修改（交付修改范围）。
+// GET 下载走同源 cookie，浏览器直接落 zip。
+function onExport(scope: string) {
+  const id = overview.value?.project.id
+  if (!id || (scope !== 'all' && scope !== 'confirmed')) return
+  window.open(`/api/projects/${id}/comments/export?scope=${scope}`)
+}
+
 // ───────────────────────── T4.1/T4.2 评论模式与评论框 ─────────────────────────
 const commentMode = ref(false)
 const capturedPayload = ref<CommentPayload | null>(null)
@@ -776,6 +785,20 @@ onBeforeUnmount(() => {
       >
         评论 {{ comments.length }}
       </button>
+      <!-- T8.3 导出评论（仅创建者）：全部评论 / 所有已确认待修改（交付修改范围） -->
+      <el-dropdown v-if="overview.project.is_creator" @command="onExport">
+        <button class="drawer-toggle" data-testid="export-comments">导出评论 ▾</button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="all" data-testid="export-option-all">
+              全部评论
+            </el-dropdown-item>
+            <el-dropdown-item command="confirmed" data-testid="export-option-confirmed">
+              所有已确认待修改
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <!-- T3.3 对账提示条：匹配 · 缺失 · 未描述（点击看明细） -->
       <span
         v-if="reconSummary"
