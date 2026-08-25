@@ -818,3 +818,142 @@ test.describe('T8.3 评论导出', () => {
     expect(m2.comments[0].comment_id).toBe(d1.comment_id)
   })
 })
+
+// ═══════════════════ T8.5 评论抽屉增强 ═══════════════════
+
+test.describe('T8.5 评论抽屉增强', () => {
+  test('标记已修改：单条 + 批量（创建者，状态闭环）', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 两条同锚点评论
+    const cids: string[] = []
+    for (const i of [1, 2]) {
+      await protoFrame.locator('[data-pa="login-account"]').click()
+      await expect(page.getByTestId('comment-box')).toBeVisible()
+      const d = await submitAndWait(page, `标记已修改测试 ${i}`)
+      cids.push(d.comment_id)
+      await page.getByTestId('comment-done').click()
+    }
+    // 确认两条 → 已确认待修改
+    const r = await page.request.post('/api/comments/batch-status', {
+      data: { cids, action: 'confirm' },
+    })
+    expect(r.ok()).toBeTruthy()
+
+    // 打开抽屉：两条同锚点合并组（×2），先展开
+    await page.getByTestId('drawer-toggle').click()
+    await expect(page.getByTestId('comment-drawer')).toBeVisible()
+    await page.getByTestId('comment-loc').click() // 展开合并组
+    // 单条「标记已修改」按钮出现（创建者）
+    await expect(page.getByTestId(`mark-done-${cids[0]}`)).toBeVisible()
+    // 单条标记 → 已修改
+    await page.getByTestId(`mark-done-${cids[0]}`).click()
+    await expect(
+      page.locator(`[data-cid="${cids[0]}"] [data-testid="comment-status"]`),
+    ).toHaveText('已修改')
+
+    // 批量：勾选另一条（已确认待修改）→ 批量标记已修改
+    await expect(page.getByTestId(`ck-${cids[1]}`)).toBeVisible()
+    await page.getByTestId(`ck-${cids[1]}`).check()
+    await page.getByTestId('batch-mark-done').click()
+    await expect(
+      page.locator(`[data-cid="${cids[1]}"] [data-testid="comment-status"]`),
+    ).toHaveText('已修改')
+  })
+
+  test('截图缩略图：展示 + 点击放大 + 关闭恢复', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 提一条带真实截图的 dom 评论
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d = await submitAndWait(page, '截图缩略图测试')
+    await page.getByTestId('comment-done').click()
+
+    await page.getByTestId('drawer-toggle').click()
+    const thumb = page.getByTestId(`shot-thumb-${d.comment_id}`)
+    await expect(thumb).toBeVisible()
+    // 缩略图 src 走评论截图接口
+    await expect(thumb).toHaveAttribute('src', `/api/comments/${d.comment_id}/shot`)
+
+    // 点击放大 → 遮罩 + 放大图出现（src 可访问）
+    await thumb.click()
+    await expect(page.getByTestId('shot-preview-mask')).toBeVisible()
+    const bigImg = page.getByTestId('shot-preview-img')
+    await expect(bigImg).toBeVisible()
+    await expect(bigImg).toHaveAttribute('src', `/api/comments/${d.comment_id}/shot`)
+
+    // 截图接口可访问（200 PNG）
+    const res = await page.request.get(`/api/comments/${d.comment_id}/shot`)
+    expect(res.status()).toBe(200)
+    expect(res.headers()['content-type']).toBe('image/png')
+
+    // 关闭 → 遮罩消失
+    await page.getByTestId('shot-close').click()
+    await expect(page.getByTestId('shot-preview-mask')).toBeHidden()
+  })
+
+  test('文档段落摘录块：doc_block 与 DOM 派生的 doc_excerpt 均展示', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // DOM 评论命中 PRD 锚点（login-account）→ 派生 doc_excerpt
+    await protoFrame.locator('[data-pa="login-account"]').click()
+    const d1 = await submitAndWait(page, 'DOM 命中锚点评论')
+    await page.getByTestId('comment-done').click()
+
+    // 文档无锚点段落评论（5.4 通用说明）→ doc_excerpt
+    const p = page
+      .getByTestId('prd-content')
+      .locator('p:not([data-pa])', { hasText: '这段没有任何锚点标记' })
+    await p.waitFor()
+    const box = (await p.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+    const d2 = await submitAndWait(page, '无锚点文档评论')
+    await page.getByTestId('comment-done').click()
+
+    await page.getByTestId('drawer-toggle').click()
+    // DOM 派生摘录块
+    const ex1 = page.locator(`[data-cid="${d1.comment_id}"] [data-testid="doc-excerpt"]`)
+    await expect(ex1).toBeVisible()
+    await expect(ex1).toContainText('账号输入')
+    // doc_block 无锚点摘录块
+    const ex2 = page.locator(`[data-cid="${d2.comment_id}"] [data-testid="doc-excerpt"]`)
+    await expect(ex2).toBeVisible()
+    await expect(ex2).toContainText('这段没有任何锚点标记')
+  })
+
+  test('无锚点评论分组：页面评论 / 无锚点段落照常在抽屉展示', async ({ page }) => {
+    const protoFrame = await openViewer(page)
+    await enableCommentMode(page)
+
+    // 页面评论（「评论本页」）
+    await page.getByTestId('comment-page-btn').click()
+    const d1 = await submitAndWait(page, '页面评论无锚点')
+    await page.getByTestId('comment-done').click()
+
+    // 无锚点文档段落评论
+    const p = page
+      .getByTestId('prd-content')
+      .locator('p:not([data-pa])', { hasText: '这段没有任何锚点标记' })
+    await p.waitFor()
+    const box = (await p.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.click(box.x + box.width - 40, box.y + 8)
+    const d2 = await submitAndWait(page, '无锚点段落评论')
+    await page.getByTestId('comment-done').click()
+
+    await page.getByTestId('drawer-toggle').click()
+    // 页面评论在原型组（index.html），标签「本页整体」
+    const pageItem = page.locator(`[data-cid="${d1.comment_id}"]`)
+    await expect(pageItem).toBeVisible()
+    await expect(page.locator('.loc-head', { hasText: '本页整体' })).toBeVisible()
+    // 无锚点段落评论在 PRD 文档组，doc_excerpt 摘录块展示
+    const docItem = page.locator(`[data-cid="${d2.comment_id}"]`)
+    await expect(docItem).toBeVisible()
+    await expect(page.locator('.group-title', { hasText: 'PRD 文档' })).toBeVisible()
+    await expect(docItem.locator('[data-testid="doc-excerpt"]')).toBeVisible()
+  })
+})

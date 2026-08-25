@@ -706,3 +706,20 @@ def export_comments(pid: int):
         as_attachment=True,
         download_name=f"{prefix}.zip",
     )
+
+
+@bp.get("/api/comments/<cid>/shot")
+def comment_shot(cid: str):
+    """评论截图（T8.5 抽屉缩略图用）：项目目录 reviews/shots/{cid}.png。
+
+    评论列表接口已返回 payload.screenshot（"shots/{cid}.png"），但项目目录
+    截图无静态代理——渲染缩略图需本接口按 comment_id 定位文件。任何已登录
+    用户可查看（浏览评论不受权限限制，§6）。
+    """
+    c = Comment.get_or_none(Comment.comment_id == cid)
+    if not c:
+        return jsonify(code=404, msg="评论不存在"), 404
+    path = os.path.join(_repo_root(c.project), "reviews", "shots", f"{cid}.png")
+    if not os.path.isfile(path):
+        return jsonify(code=404, msg="评论无截图"), 404
+    return send_file(path, mimetype="image/png")
