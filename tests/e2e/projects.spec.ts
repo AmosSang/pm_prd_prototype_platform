@@ -12,7 +12,6 @@ import { buildZip, createProject, type ProjectInfo } from './helpers'
 test.describe('T8.1 项目创建', () => {
   test('新建项目成功 → 列表出现卡片（创建者标记）', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByTestId('project-card-demo')).toBeVisible()
 
     await page.getByTestId('new-project').click()
     await page.getByTestId('form-name').fill('E2E绑定项目')

@@ -171,16 +171,6 @@ onMounted(async () => {
     <p v-if="loading" class="hint">加载中…</p>
 
     <section v-else class="cards">
-      <!-- demo 项目（fixture 直连，无 DB 记录） -->
-      <div class="card demo" data-testid="project-card-demo">
-        <h2>演示项目（内置）</h2>
-        <p class="meta">demo · 本地 fixture</p>
-        <p>
-          <router-link to="/demo/bridge">T1.1 沙箱桥接 →</router-link>
-          <router-link to="/demo/shot">T1.2 截图链路 →</router-link>
-        </p>
-      </div>
-
       <div
         v-for="p in projects"
         :key="p.id"
@@ -319,8 +309,6 @@ onMounted(async () => {
 .card-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .owner-actions { display: inline-flex; gap: 8px; }
 .card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; }
-.card.demo { border-style: dashed; }
-.card a { color: #3b82f6; text-decoration: none; margin-right: 12px; font-size: 13px; }
 .hint { color: #999; font-size: 13px; }
 .upload-zone { margin-bottom: 20px; }
 .upload-zone h3 { font-size: 14px; margin: 0 0 4px; }
