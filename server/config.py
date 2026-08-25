@@ -24,6 +24,10 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "25"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
+# T2.1 增强：163 等免费邮箱用隐式 SSL（465/994），需 SMTP_USE_SSL=1；
+# SMTP_FROM 独立发件地址（缺省沿用 SMTP_USER）
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "0").lower() in ("1", "true", "yes", "on")
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
 
 PORT = int(os.environ.get("PORT", "8081"))
 
