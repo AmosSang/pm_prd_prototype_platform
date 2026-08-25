@@ -1,31 +1,18 @@
 import { expect, test } from '@playwright/test'
-import { execSync } from 'node:child_process'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
+import { createProjectWithContent, type ProjectInfo } from './helpers'
 
 /**
  * T3.2 反向联动 E2E。
  *
  * 验收点（任务卡）：文档「定位」→ 原型滚动闪烁；跨页目标先切页再定位。
- * 场景：多页原型（login.html / home.html）+ 带页面地图的 PRD →
- * 打开分屏（默认 login 页）→ 点文档段落「定位」→ 原型侧滚动+闪烁；
+ * 场景（T8.1 本地上传）：多页原型（login.html / home.html）+ 带页面地图
+ * 的 PRD → 打开分屏（默认 login 页）→ 点文档段落「定位」→ 原型侧滚动+闪烁；
  * 点另一个页面的锚点「定位」→ iframe 自动切到 home.html 再滚动闪烁。
  */
 
-const REPO_DIR = path.join(os.tmpdir(), 'ppp-e2e-reverse-repo')
-
-function ensureReverseRepo() {
-  fs.rmSync(REPO_DIR, { recursive: true, force: true })
-  const work = path.join(os.tmpdir(), 'ppp-e2e-reverse-work')
-  fs.rmSync(work, { recursive: true, force: true })
-  fs.mkdirSync(path.join(work, 'prototype', 'pages'), { recursive: true })
-  fs.mkdirSync(path.join(work, 'prd'), { recursive: true })
-
+const PROTO = {
   // 登录页：form 在 150vh 之下（验证滚动）
-  fs.writeFileSync(
-    path.join(work, 'prototype', 'pages', 'login.html'),
-    `<!DOCTYPE html>
+  'pages/login.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
   body { font-family: system-ui, sans-serif; margin: 0; }
   .filler { height: 150vh; }
@@ -39,12 +26,8 @@ function ensureReverseRepo() {
     </form>
   </main>
 </body></html>`,
-  )
-
   // 首页：独立页面文件（验证跨页切换）
-  fs.writeFileSync(
-    path.join(work, 'prototype', 'pages', 'home.html'),
-    `<!DOCTYPE html>
+  'pages/home.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
   body { font-family: system-ui, sans-serif; margin: 0; }
   .filler { height: 150vh; }
@@ -58,12 +41,11 @@ function ensureReverseRepo() {
     </section>
   </main>
 </body></html>`,
-  )
+}
 
-  // PRD：页面地图（第 4 章）+ 功能需求锚点
-  fs.writeFileSync(
-    path.join(work, 'prd', '需求.md'),
-    `# 反向联动测试 PRD
+const PRD = {
+  name: '需求.md',
+  content: `# 反向联动测试 PRD
 
 ## 4 页面地图
 
@@ -86,42 +68,25 @@ function ensureReverseRepo() {
 
 统计卡片。
 `,
-  )
-
-  execSync(`git init -b main -q "${work}"`)
-  execSync(`git -C "${work}" config user.email t@t.local`)
-  execSync(`git -C "${work}" config user.name t`)
-  execSync(`git -C "${work}" add -A`)
-  execSync(`git -C "${work}" commit -qm init`)
-  execSync(`git clone -q --bare "${work}" "${REPO_DIR}"`)
-  fs.rmSync(work, { recursive: true, force: true })
-  return REPO_DIR
 }
 
-test.beforeAll(() => ensureReverseRepo())
-
 test.describe('T3.2 反向联动', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/')
-    await page.getByTestId('new-project').click()
-    await page.getByTestId('form-name').fill('反向联动E2E')
-    await page.getByTestId('form-repo-url').fill(ensureReverseRepo())
-    await page.getByTestId('form-token').fill('glpat-e2e')
-    await page.getByTestId('form-submit').click()
-    await expect(page.getByText('绑定成功')).toBeVisible({ timeout: 30_000 })
+  let proj: ProjectInfo
 
-    // 按 slug 精确定位（并发 worker 下同名卡片多张；列表 id 倒序最新在前）
-    const mySlug = (await page
-      .locator('.card', { hasText: '反向联动E2E' })
-      .first()
-      .locator('.meta')
-      .textContent())!.split(' ')[0]
+  test.beforeEach(async ({ page, request }) => {
+    proj = await createProjectWithContent(request, '反向联动E2E', {
+      protoFiles: PROTO,
+      prdFile: PRD,
+    })
+
+    // 按 slug 精确定位（并发 worker 下同名卡片多张；slug 数据库唯一）
+    await page.goto('/')
     await page
-      .locator('.card', { hasText: '反向联动E2E' })
-      .filter({ hasText: mySlug })
+      .locator('.card')
+      .filter({ hasText: proj.project_id })
       .getByTestId('open-project')
       .click()
-    await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
+    await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
     await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
     // 右侧 PRD 渲染完成（5.1 是 h3：### 5.1 登录页）
     await expect(
@@ -130,15 +95,15 @@ test.describe('T3.2 反向联动', () => {
   })
 
   test('页面地图解析：overview 返回 map 条目', async ({ page }) => {
-    // 直接断言页面地图数据（API 层）
-    const map = await page.evaluate(async () => {
+    // 直接断言页面地图数据（API 层，按本用例项目的 slug 过滤）
+    const map = await page.evaluate(async (slug) => {
       const res = await fetch('/api/projects', { credentials: 'include' })
       const { data } = await res.json()
-      const hit = data.find((p: { name: string }) => p.name === '反向联动E2E')
+      const hit = data.find((p: { project_id: string }) => p.project_id === slug)
       const ov = await fetch(`/api/projects/${hit.id}/overview`, { credentials: 'include' })
       const body = await ov.json()
       return body.data.page_map
-    })
+    }, proj.project_id)
     expect(map).toEqual(
       expect.arrayContaining([
         { name: '登录页', proto: 'prototype/pages/login.html', anchor: 'page-login' },

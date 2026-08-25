@@ -1,34 +1,21 @@
 import { expect, test } from '@playwright/test'
-import { execSync } from 'node:child_process'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
+import { createProjectWithContent, type ProjectInfo } from './helpers'
 
 /**
  * T3.3 锚点对账 E2E。
  *
  * 任务卡验收：构造的失配样例三态计数正确；提示条数字与明细一致。
- * 测试仓库设计（数字经过精确计算）：
+ * 测试内容设计（T8.1 本地上传；数字经过精确计算）：
  * - 匹配 3：page-a（页面锚点）、comp-form、comp-input
  * - 原型缺失 1：prd-only-anchor（PRD 有、原型无）
  * - 未描述 1：proto-only-anchor（原型有、PRD 无）
  * - PRD 重复 1 组：dup-anchor 在 PRD 出现 2 次
  * - 原型重复 1 组：dup-anchor 在原型出现 2 次（原型有 PRD 也有 → 同时计入匹配）
- * - 地图坏引用 1：地图登记 ghost.html 但仓库里没有
+ * - 地图坏引用 1：地图登记 ghost.html 但项目里没有
  */
 
-const REPO_DIR = path.join(os.tmpdir(), 'ppp-e2e-reconcile-repo')
-
-function ensureReconcileRepo() {
-  fs.rmSync(REPO_DIR, { recursive: true, force: true })
-  const work = path.join(os.tmpdir(), 'ppp-e2e-reconcile-work')
-  fs.rmSync(work, { recursive: true, force: true })
-  fs.mkdirSync(path.join(work, 'prototype', 'pages'), { recursive: true })
-  fs.mkdirSync(path.join(work, 'prd'), { recursive: true })
-
-  fs.writeFileSync(
-    path.join(work, 'prototype', 'pages', 'a.html'),
-    `<!DOCTYPE html>
+const PROTO = {
+  'pages/a.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"></head>
 <body>
 <main data-pa="page-a">
@@ -40,11 +27,11 @@ function ensureReconcileRepo() {
   <span data-pa="dup-anchor">重复2</span>
 </main>
 </body></html>`,
-  )
+}
 
-  fs.writeFileSync(
-    path.join(work, 'prd', 'spec.md'),
-    `# 对账测试 PRD
+const PRD = {
+  name: 'spec.md',
+  content: `# 对账测试 PRD
 
 ## 4 页面地图
 
@@ -73,42 +60,25 @@ PRD 侧重复出现第一次。
 
 PRD 侧重复出现第二次。
 `,
-  )
-
-  execSync(`git init -b main -q "${work}"`)
-  execSync(`git -C "${work}" config user.email t@t.local`)
-  execSync(`git -C "${work}" config user.name t`)
-  execSync(`git -C "${work}" add -A`)
-  execSync(`git -C "${work}" commit -qm init`)
-  execSync(`git clone -q --bare "${work}" "${REPO_DIR}"`)
-  fs.rmSync(work, { recursive: true, force: true })
-  return REPO_DIR
 }
 
-test.beforeAll(() => ensureReconcileRepo())
-
 test.describe('T3.3 锚点对账', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/')
-    await page.getByTestId('new-project').click()
-    await page.getByTestId('form-name').fill('对账E2E')
-    await page.getByTestId('form-repo-url').fill(ensureReconcileRepo())
-    await page.getByTestId('form-token').fill('glpat-e2e')
-    await page.getByTestId('form-submit').click()
-    await expect(page.getByText('绑定成功')).toBeVisible({ timeout: 30_000 })
+  let proj: ProjectInfo
 
-    // 按 slug 精确定位（并发 worker 下同名卡片多张；列表 id 倒序最新在前）
-    const mySlug = (await page
-      .locator('.card', { hasText: '对账E2E' })
-      .first()
-      .locator('.meta')
-      .textContent())!.split(' ')[0]
+  test.beforeEach(async ({ page, request }) => {
+    proj = await createProjectWithContent(request, '对账E2E', {
+      protoFiles: PROTO,
+      prdFile: PRD,
+    })
+
+    // 按 slug 精确定位（并发 worker 下同名卡片多张；slug 数据库唯一）
+    await page.goto('/')
     await page
-      .locator('.card', { hasText: '对账E2E' })
-      .filter({ hasText: mySlug })
+      .locator('.card')
+      .filter({ hasText: proj.project_id })
       .getByTestId('open-project')
       .click()
-    await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
+    await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
     // 查看器就绪 + 提示条出现（overview 返回后渲染）
     await expect(page.getByTestId('recon-bar')).toBeVisible({ timeout: 15_000 })
   })

@@ -1,8 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
-import { execSync } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
+import { createProjectWithContent, type ProjectInfo } from './helpers'
 
 /**
  * T4.1 评论模式元素采集 + T4.2 评论框提交链路 E2E。
@@ -16,24 +15,13 @@ import path from 'node:path'
  *
  * T4.2 验收点（任务卡）：三类评论各提交一条，DB 与 reviews/ 文件均出现。
  * DB 由 POST /comments 响应代表（API 事务性，落库失败必 4xx/5xx）；
- * reviews/ 文件直接读本地 clone 断言（JSON 字段 + 截图 PNG + git log）。
+ * reviews/ 文件直接读项目目录断言（T8.1 直写：响应返回即落盘，无队列）。
  */
 
-const REPO_DIR = path.join(os.tmpdir(), 'ppp-e2e-comment-repo')
-
-/** 造带锚点/表单/弹窗的原型与 PRD（每次运行强制重建，防上轮残留）。 */
-function ensureCommentRepo() {
-  fs.rmSync(REPO_DIR, { recursive: true, force: true })
-  const work = path.join(os.tmpdir(), 'ppp-e2e-comment-work')
-  fs.rmSync(work, { recursive: true, force: true })
-  fs.mkdirSync(path.join(work, 'prototype', 'pages'), { recursive: true })
-  fs.mkdirSync(path.join(work, 'prd'), { recursive: true })
-
+const PROTO = {
   // 首页：锚点 + 表单提交行为标记（拦截验证）+ body padding（页面评论
   // 点击落点）+ 高 spacer 与第二锚点区块（scroll_y 采集验证）
-  fs.writeFileSync(
-    path.join(work, 'prototype', 'index.html'),
-    `<!DOCTYPE html>
+  'index.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
   section { padding: 12px; border-bottom: 1px solid #eee; }
@@ -62,12 +50,8 @@ function ensureCommentRepo() {
     })
   </script>
 </body></html>`,
-  )
-
   // 弹窗页：modal_open 检测 + 拦截（评论模式点「再想想」不应关弹窗）
-  fs.writeFileSync(
-    path.join(work, 'prototype', 'pages', 'modal.html'),
-    `<!DOCTYPE html>
+  'pages/modal.html': `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
   .row { background: #fff; border: 1px solid #eee; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
@@ -101,11 +85,11 @@ function ensureCommentRepo() {
     })
   </script>
 </body></html>`,
-  )
+}
 
-  fs.writeFileSync(
-    path.join(work, 'prd', '需求.md'),
-    `# 评论采集 E2E PRD
+const PRD = {
+  name: '需求.md',
+  content: `# 评论采集 E2E PRD
 
 ## 5.1 登录页 <!-- pa: page-login -->
 
@@ -126,42 +110,22 @@ function ensureCommentRepo() {
 
 这段没有任何锚点标记，验证任意段落可评论（指纹定位）。
 `,
-  )
-
-  execSync(`git init -b main -q "${work}"`)
-  execSync(`git -C "${work}" config user.email t@t.local`)
-  execSync(`git -C "${work}" config user.name t`)
-  execSync(`git -C "${work}" add -A`)
-  execSync(`git -C "${work}" commit -qm init`)
-  execSync(`git clone -q --bare "${work}" "${REPO_DIR}"`)
-  fs.rmSync(work, { recursive: true, force: true })
-  return REPO_DIR
 }
 
-test.beforeAll(() => ensureCommentRepo())
-
-/** 绑定项目并打开查看器，返回原型 frameLocator（双侧就绪）。 */
-async function openViewer(page: Page) {
+/** 建项目 + 上传内容并打开查看器，返回原型 frameLocator（双侧就绪）。 */
+async function openViewer(page: Page): Promise<ReturnType<Page['frameLocator']>> {
+  const proj: ProjectInfo = await createProjectWithContent(page.request, '评论E2E项目', {
+    protoFiles: PROTO,
+    prdFile: PRD,
+  })
   await page.goto('/')
-  await page.getByTestId('new-project').click()
-  await page.getByTestId('form-name').fill('评论E2E项目')
-  await page.getByTestId('form-repo-url').fill(REPO_DIR)
-  await page.getByTestId('form-token').fill('glpat-e2e')
-  await page.getByTestId('form-submit').click()
-  await expect(page.getByText('绑定成功')).toBeVisible({ timeout: 30_000 })
-  // 按 slug 精确定位（并发 worker 下同名卡片多张、列表顶部归属不确定，
-  // 见 anchor.spec.ts 同款注释）
-  const mySlug = (await page
-    .locator('.card', { hasText: '评论E2E项目' })
-    .first()
-    .locator('.meta')
-    .textContent())!.split(' ')[0]
+  // 按 slug 精确定位（并发 worker 下同名卡片多张、slug 数据库唯一）
   await page
-    .locator('.card', { hasText: '评论E2E项目' })
-    .filter({ hasText: mySlug })
+    .locator('.card')
+    .filter({ hasText: proj.project_id })
     .getByTestId('open-project')
     .click()
-  await expect(page).toHaveURL(new RegExp(`/project/${mySlug}`))
+  await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
   const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
   await expect(protoFrame.locator('[data-pa="page-login"]')).toBeVisible({ timeout: 15_000 })
   return protoFrame
@@ -322,14 +286,21 @@ test.describe('T4.1 评论模式元素采集', () => {
 
 // ═══════════════════ T4.2 评论框提交链路（三类评论）═══════════════════
 
-/** 从当前 URL 提取项目 slug（clone 目录名 = /data/repos/{slug}）。 */
+/** 从当前 URL 提取项目 slug（项目目录名 = /data/projects/{slug}）。 */
 function slugOf(page: Page): string {
   return page.url().match(/\/project\/([a-z0-9-]+)/)![1]
 }
 
-/** 本地 clone 根目录（Playwright 进程 cwd = tests/）。 */
-function cloneDirOf(page: Page): string {
-  return path.resolve(process.cwd(), '..', 'data', 'repos', slugOf(page))
+/** 项目本地根目录（Playwright 进程 cwd = tests/，DATA_DIR 默认 platform/data）。 */
+function projDirOf(page: Page): string {
+  return path.resolve(process.cwd(), '..', 'data', 'projects', slugOf(page))
+}
+
+/** 读项目内评论 JSON（T8.1 直写：响应返回即落盘，无需轮询）。 */
+function readCommentJson(page: Page, cid: string): Record<string, any> {
+  return JSON.parse(
+    fs.readFileSync(path.join(projDirOf(page), 'reviews', 'comments', `${cid}.json`), 'utf-8'),
+  )
 }
 
 /** 提交评论并等 POST /comments 响应，返回响应 data（含 comment_id）。 */
@@ -346,25 +317,8 @@ async function submitAndWait(page: Page, content: string): Promise<Record<string
   return body.data
 }
 
-/** T4.3：git 落仓走异步队列——轮询 git log 直到目标 commit 出现。
- * 本地 commit 与远端 push 是同一任务的串行步骤，本地出现后远端随即跟上，
- * 两处都轮询（本地出 + 远端出 = push 生效）。 */
-async function waitForGitLog(repoDir: string, message: string, timeout = 15_000): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < timeout) {
-    try {
-      const log = execSync(`git -C "${repoDir}" log --format=%s`).toString()
-      if (log.includes(message)) return
-    } catch {
-      /* 读取竞态（worker 操作中）——重试 */
-    }
-    await new Promise((r) => setTimeout(r, 300))
-  }
-  throw new Error(`git log 未出现「${message}」（${repoDir}）`)
-}
-
 test.describe('T4.2 评论提交链路', () => {
-  test('DOM 评论全链路：截图 + 成功态 + reviews/ 文件 + git commit/push', async ({ page }) => {
+  test('DOM 评论全链路：截图 + 成功态 + reviews/ 文件直写', async ({ page }) => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
 
@@ -377,17 +331,15 @@ test.describe('T4.2 评论提交链路', () => {
     expect(cid).toMatch(/^c-\d{8}-\d{3}$/)
     expect(data.status).toBe('待确认')
     expect(data.author).toBe('E2E测试员')
-    expect(data.git_task.status).toBe('pending') // T4.3：入队即返回
+    // T8.1 去 Git 本地化：响应无落仓任务字段
+    expect(data.git_task).toBeUndefined()
 
     // 成功态：comment_id 回显 + 截图预览（提交时自动生成，可查看不可编辑）
     await expect(page.getByTestId('submitted-cid')).toHaveText(cid)
     await expect(page.getByTestId('shot-preview')).toBeVisible()
 
-    // reviews/ 评论 JSON（事实源）：payload 原样落 + doc 锚点匹配 + 截图引用
-    const clone = cloneDirOf(page)
-    const fj = JSON.parse(
-      fs.readFileSync(path.join(clone, 'reviews', 'comments', `${cid}.json`), 'utf-8'),
-    )
+    // reviews/ 评论 JSON（事实源，直写即落盘）：payload 原样落 + doc 锚点匹配 + 截图引用
+    const fj = readCommentJson(page, cid)
     expect(fj.comment_id).toBe(cid)
     expect(fj.status).toBe('待确认')
     expect(fj.author).toBe('E2E测试员')
@@ -398,21 +350,14 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.anchor_id).toBe('login-account')
     expect(fj.nearest_anchor_id).toBe('login-form')
     expect(fj.interaction_state.viewport).toMatch(/^\d+x\d+$/)
-    // doc 匹配：候选锚点 login-account 命中 PRD 锚点（E2E 播种用户名「E2E测试员」）
+    // doc 匹配：候选锚点 login-account 命中 PRD 锚点
     expect(fj.doc_anchor_id).toBe('login-account')
     expect(fj.doc_excerpt).toContain('账号输入')
     // 截图：文件引用与 PNG 落盘 + 红框坐标
     expect(fj.screenshot).toBe(`shots/${cid}.png`)
-    expect(fs.existsSync(path.join(clone, 'reviews', 'shots', `${cid}.png`))).toBe(true)
+    expect(fs.existsSync(path.join(projDirOf(page), 'reviews', 'shots', `${cid}.png`))).toBe(true)
     expect(fj.highlight_rect).toBeTruthy()
     expect(fj.highlight_rect.w).toBeGreaterThan(0)
-
-    // git：本地 clone 与远端裸仓库（push 生效）最新 commit——队列异步，
-    // 轮询等待（任务卡验收：提交评论后 git log 出现对应 commit）
-    await waitForGitLog(clone, `comment: ${cid} 创建`)
-    await waitForGitLog(REPO_DIR, `comment: ${cid} 创建`)
-    const msg = execSync(`git -C "${clone}" log -1 --format=%s`).toString().trim()
-    expect(msg).toBe(`comment: ${cid} 创建`)
 
     // 完成按钮关闭评论框
     await page.getByTestId('comment-done').click()
@@ -432,13 +377,7 @@ test.describe('T4.2 评论提交链路', () => {
     const data = await submitAndWait(page, '本页首屏加载偏慢，需要骨架屏')
     const cid: string = data.comment_id
 
-    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
-    const fj = JSON.parse(
-      fs.readFileSync(
-        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
-        'utf-8',
-      ),
-    )
+    const fj = readCommentJson(page, cid)
     expect(fj.target_type).toBe('page')
     expect(fj.css_path).toBe('body')
     // 页面评论不采 outer_html（整页 HTML 无定位意义——T4.2 修订）
@@ -467,13 +406,7 @@ test.describe('T4.2 评论提交链路', () => {
     const data = await submitAndWait(page, '账号输入需要补充支持邮箱登录的说明')
     const cid: string = data.comment_id
 
-    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
-    const fj = JSON.parse(
-      fs.readFileSync(
-        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
-        'utf-8',
-      ),
-    )
+    const fj = readCommentJson(page, cid)
     expect(fj.target_type).toBe('doc_block')
     expect(fj.doc_anchor_id).toBe('login-account')
     expect(fj.doc_excerpt).toContain('账号输入')
@@ -507,13 +440,7 @@ test.describe('T4.2 评论提交链路', () => {
     const data = await submitAndWait(page, '这段的通用说明需要补充适用范围')
     const cid: string = data.comment_id
 
-    await waitForGitLog(cloneDirOf(page), `comment: ${cid} 创建`)
-    const fj = JSON.parse(
-      fs.readFileSync(
-        path.join(cloneDirOf(page), 'reviews', 'comments', `${cid}.json`),
-        'utf-8',
-      ),
-    )
+    const fj = readCommentJson(page, cid)
     expect(fj.target_type).toBe('doc_block')
     expect(fj.doc_anchor_id).toBe('')
     // 指纹 = sha1(标题链|段落文本)[:16]
@@ -527,11 +454,11 @@ test.describe('T4.2 评论提交链路', () => {
 // ═══════════════════ T4.4 评论抽屉：批量确认 / 筛选 / 角标 ═══════════════════
 
 test.describe('T4.4 评论列表抽屉', () => {
-  test('批量确认：状态变更 + 落仓 JSON + git log（任务卡验收）', async ({ page }) => {
+  test('批量确认：状态变更 + 评论 JSON 直写（任务卡验收）', async ({ page }) => {
     await openViewer(page)
     await enableCommentMode(page)
 
-    // 提交 2 条同锚点评论（login-account）+ 1 条另一锚点
+    // 提交 2 条同锚点评论（login-account）
     const cids: string[] = []
     for (const _ of [1, 2]) {
       await page.getByTestId('comment-page-btn').isVisible() // 稳定 UI
@@ -542,7 +469,6 @@ test.describe('T4.4 评论列表抽屉', () => {
       cids.push(data.comment_id)
       await page.getByTestId('comment-done').click()
     }
-    await Promise.all(cids.map((c) => waitForGitLog(cloneDirOf(page), `comment: ${c} 创建`)))
 
     // 打开抽屉：分组 + 同位置合并角标 ×2
     await page.getByTestId('drawer-toggle').click()
@@ -571,15 +497,9 @@ test.describe('T4.4 评论列表抽屉', () => {
       )
     }
 
-    // 落仓：JSON status 字段 + git log（轮询）
-    await Promise.all(
-      cids.map((c) => waitForGitLog(cloneDirOf(page), `comment: ${c} → 已确认待修改`)),
-    )
-    const clone = cloneDirOf(page)
+    // 落盘：JSON status 字段（T8.1 直写，响应返回即完成）
     for (const c of cids) {
-      const fj = JSON.parse(
-        fs.readFileSync(path.join(clone, 'reviews', 'comments', `${c}.json`), 'utf-8'),
-      )
+      const fj = readCommentJson(page, c)
       expect(fj.status).toBe('已确认待修改')
     }
   })
@@ -600,10 +520,6 @@ test.describe('T4.4 评论列表抽屉', () => {
     await page.mouse.click(box.x + box.width - 40, box.y + 8)
     const d2 = await submitAndWait(page, '文档侧评论')
     await page.getByTestId('comment-done').click()
-    await Promise.all([
-      waitForGitLog(cloneDirOf(page), `comment: ${d1.comment_id} 创建`),
-      waitForGitLog(cloneDirOf(page), `comment: ${d2.comment_id} 创建`),
-    ])
 
     await page.getByTestId('drawer-toggle').click()
     await expect(page.getByTestId('comment-drawer')).toBeVisible()
@@ -686,10 +602,6 @@ test.describe('T4.4 评论定位与文档角标', () => {
     await page.getByTestId('comment-page-btn').click()
     const d2 = await submitAndWait(page, '定位测试页面评论')
     await page.getByTestId('comment-done').click()
-    await Promise.all([
-      waitForGitLog(cloneDirOf(page), `comment: ${d1.comment_id} 创建`),
-      waitForGitLog(cloneDirOf(page), `comment: ${d2.comment_id} 创建`),
-    ])
 
     // 打开抽屉 → 点 dom 评论「定位」→ 目标元素闪烁（pp-anchor-flash，1.6s 窗口内断言）
     await page.getByTestId('drawer-toggle').click()
@@ -718,7 +630,6 @@ test.describe('T4.4 评论定位与文档角标', () => {
     await page.mouse.click(box.x + box.width - 40, box.y + 8)
     const d = await submitAndWait(page, '定位测试文档评论')
     await page.getByTestId('comment-done').click()
-    await waitForGitLog(cloneDirOf(page), `comment: ${d.comment_id} 创建`)
 
     // 抽屉 → 定位 → 该段落高亮（anchor-highlight class）
     await page.getByTestId('drawer-toggle').click()
@@ -740,7 +651,6 @@ test.describe('T4.4 评论定位与文档角标', () => {
       await submitAndWait(page, `文档角标测试 ${i}`)
       await page.getByTestId('comment-done').click()
     }
-    await waitForGitLog(cloneDirOf(page), `comment: `)
 
     // hover 段落 → 角标显示 ×2
     const box = (await li.boundingBox())!
@@ -768,7 +678,6 @@ test.describe('T4.5 项目级可评论开关', () => {
     await protoFrame.locator('[data-pa="login-account"]').click()
     const d = await submitAndWait(page, '开关关闭前提交的评论')
     await page.getByTestId('comment-done').click()
-    await waitForGitLog(cloneDirOf(page), `comment: ${d.comment_id} 创建`)
 
     // 关闭「允许评论」→ 评论模式联动关闭 + 入口置灰（任务卡验收点）
     await page.getByTestId('commentable-toggle').click()

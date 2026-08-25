@@ -1,92 +1,37 @@
-"""T2.3 项目绑定单测。
+"""T2.3 / T8.1 项目创建与本地存储单测。
 
-覆盖任务卡验收点：
-- 绑定成功：DB 记录 + clone 目录存在 + .git/config 无 token
-- 错误 token：认证失败提示
-- 仓库不存在：not found 提示
-- 列表接口不回传任何 token 字段
+T8.1 去 Git 本地化后的验收点：
+- 创建项目：只填名称 → DB 记录（creator_id）+ PROJECTS_DIR 目录骨架
+- 目录工具：ensure_project_dirs 骨架齐全、project_dir 拒绝非法 slug
+- 列表接口：带创建者信息与 is_creator 标记，无任何 git 字段
+- 查看器 API（overview/prd）：读本地目录（prd/ 优先、根目录 md 兼容、防穿越）
+- 可评论开关（T4.5）：默认开、PATCH 往返、参数校验
 
-远端用本地裸仓库 / 假 HTTP GitLab（401/404），零真实网络。
+零 git、零网络：项目目录全在 monkeypatch 的临时 PROJECTS_DIR 下。
 """
-import http.server
+import io
 import os
-import socketserver
-import subprocess
 import sys
-import threading
+import zipfile
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.app import create_app  # noqa: E402
-from server.crypto_util import decrypt_token, encrypt_token  # noqa: E402
-from server.models import Project, db, init_tables  # noqa: E402
+from server.models import Project, User, db, init_tables  # noqa: E402
+from server.storage import SLUG_RE, ensure_project_dirs, project_dir  # noqa: E402
 
-# ───────────────────────── 工具：本地裸仓库远端 ─────────────────────────
-
-def make_bare_remote(tmp_path, name: str, branch: str = "main") -> str:
-    """造一个带 prototype/prd 的裸仓库，返回其路径。"""
-    work = tmp_path / f"{name}-work"
-    bare = tmp_path / f"{name}.git"
-    work.mkdir()
-    subprocess.run(["git", "init", "-b", branch, str(work)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t.local"], check=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
-    (work / "prototype").mkdir()
-    (work / "prototype" / "index.html").write_text("<html><body>hi</body></html>")
-    (work / "prd").mkdir()
-    (work / "prd" / "a.md").write_text("# PRD\n")
-    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(work), "commit", "-qm", "init"], check=True)
-    subprocess.run(["git", "clone", "--bare", str(work), str(bare)], check=True, capture_output=True)
-    return str(bare)
-
-
-class _FakeGitLab(http.server.BaseHTTPRequestHandler):
-    """假 GitLab：只返回固定状态码，用于触发 git 真实报错文案。"""
-
-    status = 401
-
-    def do_GET(self):
-        self.send_response(self.status)
-        self.end_headers()
-
-    def log_message(self, *a):
-        pass
-
-
-@pytest.fixture()
-def fake_gitlab_401():
-    srv = socketserver.TCPServer(("127.0.0.1", 0), _FakeGitLab)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{port}/grp/repo.git"
-    srv.shutdown()
-
-
-@pytest.fixture()
-def fake_gitlab_404(fake_gitlab_401):
-    # 复用端口不行，单独起 404 服务
-    _FakeGitLab.status = 404
-    srv = socketserver.TCPServer(("127.0.0.1", 0), _FakeGitLab)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{port}/grp/repo.git"
-    srv.shutdown()
-    _FakeGitLab.status = 401
-
-
-# ───────────────────────── fixture：独立 DB + REPOS_DIR ─────────────────────────
+# ───────────────────────── fixture：独立 DB + PROJECTS_DIR ─────────────────────────
 
 @pytest.fixture()
 def app(tmp_path, monkeypatch):
     db.close()
     db.init(str(tmp_path / "test.db"))
 
-    repos_dir = tmp_path / "repos"
-    repos_dir.mkdir()
-    monkeypatch.setattr("server.gitops.REPOS_DIR", str(repos_dir))
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr("server.storage.PROJECTS_DIR", str(projects_dir))
 
     app = create_app()
     app.config["TESTING"] = True
@@ -94,121 +39,142 @@ def app(tmp_path, monkeypatch):
 
     with app.app_context():
         init_tables()
+        User.create(email="pm@corp.com", name="产品桑")
         with app.test_client() as c:
-            # 模拟已登录（绕过验证码流程）
+            # 模拟已登录（绕过验证码流程；uid=1 对应上面建的 user）
             with c.session_transaction() as sess:
                 sess["uid"] = 1
                 sess["email"] = "pm@corp.com"
                 sess["name"] = "产品桑"
-            yield c, str(repos_dir)
+            yield c, str(projects_dir)
 
 
-# ───────────────────────── 用例 ─────────────────────────
+def _populate(root: str, files: dict[str, str]) -> None:
+    """往项目目录写文件（模拟 T8.2 上传接口落盘的产物）。"""
+    for rel, content in files.items():
+        full = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(content)
+
+
+# ───────────────────────── storage 工具（T8.1） ─────────────────────────
+
+class TestStorage:
+    def test_ensure_project_dirs_skeleton(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("server.storage.PROJECTS_DIR", str(tmp_path))
+        root = ensure_project_dirs("my-proj")
+        assert root == os.path.join(str(tmp_path), "my-proj")
+        for sub in ("prototype", "prd", "reviews/comments", "reviews/shots"):
+            assert os.path.isdir(os.path.join(root, *sub.split("/"))), f"缺 {sub}"
+        # 幂等
+        ensure_project_dirs("my-proj")
+
+    def test_project_dir_rejects_bad_slug(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("server.storage.PROJECTS_DIR", str(tmp_path))
+        for bad in ("../etc", "a b", "UPPER", "-lead", "", "x" * 40):
+            assert not SLUG_RE.fullmatch(bad)
+            with pytest.raises(ValueError):
+                project_dir(bad)
+
+    def test_project_dir_demo_uses_fixture(self, monkeypatch):
+        """demo 项目特判指向 tests/fixtures（T1.1 以来行为不变）。"""
+        monkeypatch.setattr("server.storage.DEMO_REPO_DIR", "/tmp/demo-fixture")
+        assert project_dir("demo") == os.path.realpath("/tmp/demo-fixture")
+
+
+# ───────────────────────── 创建项目（T8.1） ─────────────────────────
 
 class TestCreateProject:
-    def test_bind_success(self, app, tmp_path):
-        """绑定成功：DB 记录 + clone 目录 + .git/config 无 token + 响应无 token。"""
-        client, repos_dir = app
-        remote = make_bare_remote(tmp_path, "ok")
+    def test_create_success_dirs_and_creator(self, app):
+        """创建成功：DB 记录（creator_id）+ 目录骨架 + 响应带创建者与 is_creator。"""
+        client, projects_dir = app
 
-        resp = client.post("/api/projects", json={
-            "name": "演示项目", "repo_url": remote, "token": "glpat-secret-token", "branch": "main",
-        })
+        resp = client.post("/api/projects", json={"name": "演示项目"})
         assert resp.status_code == 200, resp.get_json()
         data = resp.get_json()["data"]
 
-        # DB 记录
         p = Project.get(Project.project_id == data["project_id"])
         assert p.name == "演示项目"
-        # token 加密落库（可解回，但不是明文）
-        assert p.encrypted_token != "glpat-secret-token"
-        assert decrypt_token(p.encrypted_token) == "glpat-secret-token"
-        # clone 目录存在且含内容
-        clone = os.path.join(repos_dir, data["project_id"])
-        assert os.path.isfile(os.path.join(clone, "prototype", "index.html"))
-        # .git/config 无 token（本地路径远端本就不含，此断言防回归）
-        cfg = open(os.path.join(clone, ".git", "config"), encoding="utf-8").read()
-        assert "glpat-secret-token" not in cfg
-        # 响应体无任何 token 字段
-        assert "token" not in resp.get_data(as_text=True) or "glpat-secret-token" not in resp.get_data(as_text=True)
+        assert p.creator_id == 1
+        assert p.commentable is True
+        assert p.content_updated_at is None
 
-    def test_wrong_token_hint(self, app, fake_gitlab_401):
-        """错误 token：认证失败提示（走假 GitLab 401）。"""
+        root = os.path.join(projects_dir, data["project_id"])
+        for sub in ("prototype", "prd", "reviews/comments", "reviews/shots"):
+            assert os.path.isdir(os.path.join(root, *sub.split("/"))), f"缺 {sub}"
+
+        assert data["creator"]["name"] == "产品桑"
+        assert data["creator"]["email"] == "pm@corp.com"
+        assert data["is_creator"] is True
+
+    def test_create_generates_unique_slug(self, app):
+        """同名项目 slug 不冲突（随机后缀防撞）。"""
         client, _ = app
-        resp = client.post("/api/projects", json={
-            "name": "错token", "repo_url": fake_gitlab_401, "token": "bad-token", "branch": "main",
-        })
-        assert resp.status_code == 400
-        assert "认证失败" in resp.get_json()["msg"]
+        r1 = client.post("/api/projects", json={"name": "同名"}).get_json()["data"]
+        r2 = client.post("/api/projects", json={"name": "同名"}).get_json()["data"]
+        assert r1["project_id"] != r2["project_id"]
 
-    def test_repo_not_found_hint(self, app, fake_gitlab_404):
-        """仓库不存在：not found 提示。"""
+    def test_create_missing_name(self, app):
         client, _ = app
-        resp = client.post("/api/projects", json={
-            "name": "不存在", "repo_url": fake_gitlab_404, "token": "any", "branch": "main",
-        })
-        assert resp.status_code == 400
-        assert "仓库不存在" in resp.get_json()["msg"]
-
-    def test_clone_failure_no_db_record(self, app, fake_gitlab_401):
-        """clone 失败不落库、不留半成品目录。"""
-        client, repos_dir = app
-        before = Project.select().count()
-        client.post("/api/projects", json={
-            "name": "失败", "repo_url": fake_gitlab_401, "token": "x", "branch": "main",
-        })
-        assert Project.select().count() == before
-        assert os.listdir(repos_dir) == []
-
-    def test_missing_fields(self, app):
-        client, _ = app
-        resp = client.post("/api/projects", json={"name": "", "repo_url": "", "token": ""})
+        resp = client.post("/api/projects", json={"name": ""})
         assert resp.status_code == 400
         assert "项目名" in resp.get_json()["msg"]
 
+    def test_create_name_too_long(self, app):
+        client, _ = app
+        resp = client.post("/api/projects", json={"name": "长" * 51})
+        assert resp.status_code == 400
+
+    def test_create_requires_login(self, tmp_path, monkeypatch):
+        db.close()
+        db.init(str(tmp_path / "nologin.db"))
+        monkeypatch.setattr("server.storage.PROJECTS_DIR", str(tmp_path / "projects"))
+        app = create_app()
+        app.config["TESTING"] = True
+        app.secret_key = "test-secret"
+        with app.test_client() as c:
+            resp = c.post("/api/projects", json={"name": "未登录"})
+            assert resp.status_code == 401
+
+
+# ───────────────────────── 列表（T8.1：创建者标记 + 无 git 字段） ─────────────────────────
 
 class TestListProjects:
-    def test_list_no_token_leak(self, app, tmp_path):
-        """列表接口不回传 token/encrypted_token。"""
+    def test_list_has_creator_no_git_fields(self, app):
         client, _ = app
-        remote = make_bare_remote(tmp_path, "list")
-        client.post("/api/projects", json={
-            "name": "列表项目", "repo_url": remote, "token": "glpat-leak-check", "branch": "main",
-        })
+        client.post("/api/projects", json={"name": "列表项目"})
 
         resp = client.get("/api/projects")
         assert resp.status_code == 200
         body = resp.get_data(as_text=True)
-        assert "glpat-leak-check" not in body
-        assert "encrypted_token" not in body
+        for gone in ("repo_url", "encrypted_token", "branch", "last_sync_at", "sync_error", "token"):
+            assert gone not in body, f"列表仍泄漏 {gone}"
+
         data = resp.get_json()["data"]
         assert len(data) == 1
-        assert data[0]["name"] == "列表项目"
-        assert data[0]["branch"] == "main"
+        assert data[0]["creator"]["name"] == "产品桑"
+        assert data[0]["is_creator"] is True
 
 
-class TestCrypto:
-    def test_roundtrip_and_mask(self):
-        enc = encrypt_token("glpat-abcdef1234")
-        assert decrypt_token(enc) == "glpat-abcdef1234"
-        assert enc != "glpat-abcdef1234"
-        from server.crypto_util import mask_token
-
-        assert mask_token("glpat-abcdef1234") == "****1234"
-        assert mask_token("short") == "****"
-
-
-# ───────────────────────── T2.4 查看器 API ─────────────────────────
+# ───────────────────────── T2.4 查看器 API（本地目录数据源） ─────────────────────────
 
 class TestViewerAPI:
-    def test_overview_docs_and_entries(self, app, tmp_path):
-        """overview：prd/ 优先；无 prd/ 时兼容根目录 md；原型入口列出。"""
-        client, repos_dir = app
-        remote = make_bare_remote(tmp_path, "viewer")
-        resp = client.post("/api/projects", json={
-            "name": "查看器", "repo_url": remote, "token": "tk", "branch": "main",
+    def _make_project(self, client, projects_dir, name, files):
+        resp = client.post("/api/projects", json={"name": name})
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        root = os.path.join(projects_dir, data["project_id"])
+        _populate(root, files)
+        return data["id"]
+
+    def test_overview_docs_and_entries(self, app):
+        """overview：prd/ 优先；原型入口列出。"""
+        client, projects_dir = app
+        pid = self._make_project(client, projects_dir, "查看器", {
+            "prototype/index.html": "<html><body>hi</body></html>",
+            "prd/a.md": "# PRD\n",
         })
-        pid = resp.get_json()["data"]["id"]
 
         resp = client.get(f"/api/projects/{pid}/overview")
         assert resp.status_code == 200
@@ -216,142 +182,46 @@ class TestViewerAPI:
         assert data["docs"] == ["prd/a.md"]
         assert "prototype/index.html" in data["proto_entries"]
 
-    def test_overview_root_md_compat(self, app, tmp_path):
-        """仓库无 prd/ 目录（根目录直接放 md）也能列出文档。"""
-        client, repos_dir = app
-        # 手工构造一个「根目录放 md」的裸仓库
-        work = tmp_path / "flat-work"
-        bare = tmp_path / "flat.git"
-        work.mkdir()
-        subprocess.run(["git", "init", "-b", "main", "-q", str(work)], check=True)
-        subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t.local"], check=True)
-        subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
-        (work / "灵雁思路.md").write_text("# 灵雁\n")
-        subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(work), "commit", "-qm", "init"], check=True)
-        subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True, capture_output=True)
+    def test_overview_root_md_compat(self, app):
+        """项目根直接放 md（prd/ 缺失时）也能列出文档并读取（中文文件名）。
 
-        resp = client.post("/api/projects", json={
-            "name": "扁平仓库", "repo_url": str(bare), "token": "tk", "branch": "main",
+        T8.1 骨架必有 prd/；此处删掉空 prd/ 模拟无 prd/ 的目录（兼容分支）。
+        """
+        client, projects_dir = app
+        pid = self._make_project(client, projects_dir, "扁平项目", {
+            "灵雁思路.md": "# 灵雁\n",
         })
-        pid = resp.get_json()["data"]["id"]
+        slug = Project.get(Project.id == pid).project_id
+        import shutil
+
+        shutil.rmtree(os.path.join(projects_dir, slug, "prd"))
+
         resp = client.get(f"/api/projects/{pid}/overview")
         assert resp.get_json()["data"]["docs"] == ["灵雁思路.md"]
 
-        # prd 接口能读根目录 md（中文文件名）
         resp = client.get(f"/api/projects/{pid}/prd?file=灵雁思路.md")
         assert resp.status_code == 200
         assert "# 灵雁" in resp.get_json()["data"]["content"]
 
-    def test_prd_file_traversal_blocked(self, app, tmp_path):
+    def test_prd_file_traversal_blocked(self, app):
         """prd 接口防目录穿越（.. / 绝对路径 / 越界路径全拒绝）。"""
-        client, _ = app
-        remote = make_bare_remote(tmp_path, "trav")
-        resp = client.post("/api/projects", json={
-            "name": "穿越", "repo_url": remote, "token": "tk", "branch": "main",
+        client, projects_dir = app
+        pid = self._make_project(client, projects_dir, "穿越", {
+            "prd/a.md": "# PRD\n",
         })
-        pid = resp.get_json()["data"]["id"]
 
         for bad in ["../platform.db", "/etc/passwd", "prd/../../server/app.py", ""]:
             resp = client.get(f"/api/projects/{pid}/prd", query_string={"file": bad})
             assert resp.status_code in (400, 404), f"{bad} 未被拦截"
 
-    def test_prd_normal_read(self, app, tmp_path):
-        client, _ = app
-        remote = make_bare_remote(tmp_path, "read")
-        resp = client.post("/api/projects", json={
-            "name": "读取", "repo_url": remote, "token": "tk", "branch": "main",
+    def test_prd_normal_read(self, app):
+        client, projects_dir = app
+        pid = self._make_project(client, projects_dir, "读取", {
+            "prd/a.md": "# PRD\n",
         })
-        pid = resp.get_json()["data"]["id"]
-
         resp = client.get(f"/api/projects/{pid}/prd?file=prd/a.md")
         assert resp.status_code == 200
         assert resp.get_json()["data"]["content"] == "# PRD\n"
-
-
-# ───────────────────────── T3.1 手动同步（临时按钮） ─────────────────────────
-
-class TestSyncProject:
-    def test_sync_pulls_new_commit(self, app, tmp_path):
-        """远端 push 新提交 → sync → 本地 clone 更新 + last_sync_at 刷新。"""
-        client, repos_dir = app
-        remote = make_bare_remote(tmp_path, "sync")
-        resp = client.post("/api/projects", json={
-            "name": "同步项目", "repo_url": remote, "token": "tk", "branch": "main",
-        })
-        slug = resp.get_json()["data"]["project_id"]
-        pid = resp.get_json()["data"]["id"]
-        clone = os.path.join(repos_dir, slug)
-
-        # 远端加新文档 push（往裸仓库推：临时 work clone）
-        pushdir = tmp_path / "push-work"
-        subprocess.run(["git", "clone", "-q", remote, str(pushdir)], check=True, capture_output=True)
-        (pushdir / "prd" / "new.md").write_text("# 新文档\n")
-        subprocess.run(["git", "-C", str(pushdir), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(pushdir), "commit", "-qm", "add doc"], check=True)
-        subprocess.run(["git", "-C", str(pushdir), "push", "-q"], check=True, capture_output=True)
-
-        # 同步前本地无新文档
-        assert not os.path.exists(os.path.join(clone, "prd", "new.md"))
-
-        resp = client.post(f"/api/projects/{pid}/sync")
-        assert resp.status_code == 200, resp.get_json()
-        assert os.path.isfile(os.path.join(clone, "prd", "new.md"))
-        p = Project.get(Project.id == pid)
-        assert p.sync_error is None
-        assert p.last_sync_at is not None
-
-    def test_sync_already_up_to_date(self, app, tmp_path):
-        """无新提交时 sync 也成功（Already up to date 不算错误）。"""
-        client, _ = app
-        remote = make_bare_remote(tmp_path, "uptodate")
-        resp = client.post("/api/projects", json={
-            "name": "最新项目", "repo_url": remote, "token": "tk", "branch": "main",
-        })
-        pid = resp.get_json()["data"]["id"]
-
-        resp = client.post(f"/api/projects/{pid}/sync")
-        assert resp.status_code == 200
-
-    def test_sync_auth_error_sets_sync_error(self, app, tmp_path, fake_gitlab_401):
-        """远端不可达/认证失败：400 + 中文提示 + sync_error 落库。
-
-        注意：fetch 走本地 .git/config 里的 origin URL（不是 DB repo_url），
-        所以模拟方式是直接改 clone 的 remote URL（等价于远端后来挂了/token 过期）。
-        """
-        client, repos_dir = app
-        remote = make_bare_remote(tmp_path, "dead")
-        resp = client.post("/api/projects", json={
-            "name": "坏远端", "repo_url": remote, "token": "tk", "branch": "main",
-        })
-        pid = resp.get_json()["data"]["id"]
-        slug = Project.get(Project.id == pid).project_id
-        subprocess.run(
-            ["git", "-C", os.path.join(repos_dir, slug), "remote", "set-url", "origin", fake_gitlab_401],
-            check=True, capture_output=True,
-        )
-
-        resp = client.post(f"/api/projects/{pid}/sync")
-        assert resp.status_code == 400
-        assert "认证失败" in resp.get_json()["msg"]
-        assert "认证失败" in Project.get(Project.id == pid).sync_error
-
-    def test_sync_no_local_clone(self, app, tmp_path):
-        """本地 clone 被删：明确提示重新绑定。"""
-        client, repos_dir = app
-        remote = make_bare_remote(tmp_path, "gone")
-        resp = client.post("/api/projects", json={
-            "name": "被删项目", "repo_url": remote, "token": "tk", "branch": "main",
-        })
-        pid = resp.get_json()["data"]["id"]
-        slug = Project.get(Project.id == pid).project_id
-        import shutil
-
-        shutil.rmtree(os.path.join(repos_dir, slug))
-
-        resp = client.post(f"/api/projects/{pid}/sync")
-        assert resp.status_code == 400
-        assert "重新绑定" in resp.get_json()["msg"]
 
 
 # ───────────────────────── T4.5 项目级「可评论」开关 ─────────────────────────
@@ -359,18 +229,15 @@ class TestSyncProject:
 class TestUpdateProject:
     """PATCH /api/projects/{pid} {commentable}（产品方案 §4.5）。"""
 
-    def _make_project(self, client, tmp_path, name: str) -> int:
-        remote = make_bare_remote(tmp_path, name)
-        resp = client.post("/api/projects", json={
-            "name": name, "repo_url": remote, "token": "tk", "branch": "main",
-        })
+    def _make_project(self, client, name: str) -> int:
+        resp = client.post("/api/projects", json={"name": name})
         assert resp.status_code == 200, resp.get_json()
         return resp.get_json()["data"]["id"]
 
-    def test_commentable_default_on_and_toggle(self, app, tmp_path):
+    def test_commentable_default_on_and_toggle(self, app):
         """默认开启（T2.3 建表预留）；PATCH 关→开往返落库且响应带最新值。"""
         client, _ = app
-        pid = self._make_project(client, tmp_path, "开关项目")
+        pid = self._make_project(client, "开关项目")
         assert Project.get(Project.id == pid).commentable is True
 
         resp = client.patch(f"/api/projects/{pid}", json={"commentable": False})
@@ -383,11 +250,124 @@ class TestUpdateProject:
         assert resp.get_json()["data"]["commentable"] is True
         assert Project.get(Project.id == pid).commentable is True
 
-    def test_commentable_validation(self, app, tmp_path):
+    def test_commentable_validation(self, app):
         """缺字段 / 非布尔（字符串、数字——bool 是 int 子类须显式排除）/ 项目不存在。"""
         client, _ = app
-        pid = self._make_project(client, tmp_path, "开关项目2")
+        pid = self._make_project(client, "开关项目2")
         assert client.patch(f"/api/projects/{pid}", json={}).status_code == 400
         assert client.patch(f"/api/projects/{pid}", json={"commentable": "yes"}).status_code == 400
         assert client.patch(f"/api/projects/{pid}", json={"commentable": 1}).status_code == 400
         assert client.patch("/api/projects/99999", json={"commentable": True}).status_code == 404
+
+
+# ───────────────────── 内容上传（T8.1 最小版）─────────────────────
+
+def _zip_bytes(files: dict[str, str]) -> bytes:
+    """内存造 zip（{相对路径: 内容}）。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for rel, content in files.items():
+            zf.writestr(rel, content)
+    return buf.getvalue()
+
+
+class TestUploadAPI:
+    def _make_project(self, client, projects_dir, name) -> tuple:
+        resp = client.post("/api/projects", json={"name": name})
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        return data["id"], os.path.join(projects_dir, data["project_id"])
+
+    def test_upload_prd_writes_and_replaces(self, app):
+        """PRD 上传：写入 prd/（保留上传文件名）+ 替换旧文档 + content_updated_at。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "PRD项目")
+
+        r1 = client.post(f"/api/projects/{pid}/prd", data={
+            "file": (io.BytesIO("# V1\n".encode()), "需求.md"),
+        }, content_type="multipart/form-data")
+        assert r1.status_code == 200, r1.get_json()
+        assert os.path.isfile(os.path.join(root, "prd", "需求.md"))
+
+        # 再传一份 → 旧文档被替换（prd/ 唯一 markdown 约定）
+        r2 = client.post(f"/api/projects/{pid}/prd", data={
+            "file": (io.BytesIO("# V2\n".encode()), "需求V2.md"),
+        }, content_type="multipart/form-data")
+        assert r2.status_code == 200
+        assert not os.path.exists(os.path.join(root, "prd", "需求.md"))
+        assert os.path.isfile(os.path.join(root, "prd", "需求V2.md"))
+        assert Project.get(Project.id == pid).content_updated_at is not None
+
+    def test_upload_prd_rules(self, app):
+        """PRD 上传：非 md 拒；文件名穿越被 basename 化；仅创建者。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "PRD规则")
+        assert client.post(f"/api/projects/{pid}/prd", data={
+            "file": (io.BytesIO(b"x"), "a.txt"),
+        }, content_type="multipart/form-data").status_code == 400
+
+        # 换用户 → 403（创建者专属）
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+        assert client.post(f"/api/projects/{pid}/prd", data={
+            "file": (io.BytesIO(b"# x"), "a.md"),
+        }, content_type="multipart/form-data").status_code == 403
+
+    def test_upload_prototype_unzips(self, app):
+        """原型 zip 上传：解压到 prototype/（含子目录），content_updated_at 刷新。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "原型项目")
+
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "index.html": "<html><body>hi</body></html>",
+                "pages/login.html": "<html><body>login</body></html>",
+            })), "proto.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+        assert os.path.isfile(os.path.join(root, "prototype", "pages", "login.html"))
+        assert Project.get(Project.id == pid).content_updated_at is not None
+
+    def test_upload_prototype_zip_slip_rejected(self, app):
+        """zip-slip 条目拒绝：400 + 旧 prototype/ 原样保留（校验过才替换）。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "穿越项目")
+        # 先传一版正常内容
+        client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({"index.html": "<html>v1</html>"})), "p.zip"),
+        }, content_type="multipart/form-data")
+
+        evil = _zip_bytes({"../../evil.txt": "pwned"})
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(evil), "evil.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 400
+        assert "路径穿越" in resp.get_json()["msg"]
+        # 旧版本保留 + 攻击文件未落盘
+        assert open(os.path.join(root, "prototype", "index.html"), encoding="utf-8").read() == "<html>v1</html>"
+        assert not os.path.exists(os.path.join(root, "..", "..", "evil.txt"))
+        # 临时目录不残留
+        assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
+
+    def test_upload_prototype_not_zip_rejected(self, app):
+        """非 zip 内容拒绝：400。"""
+        client, projects_dir = app
+        pid, _ = self._make_project(client, projects_dir, "非zip项目")
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(b"not a zip at all"), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 400
+        assert "zip" in resp.get_json()["msg"]
+
+    def test_upload_prototype_creator_only(self, app):
+        """原型上传仅创建者：其他登录用户 403。"""
+        client, projects_dir = app
+        pid, _ = self._make_project(client, projects_dir, "权限项目")
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({"index.html": "x"})), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 403
+        assert "仅项目创建者" in resp.get_json()["msg"]
