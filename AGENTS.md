@@ -23,9 +23,17 @@ platform/
 │   ├── vite.config.ts
 │   └── src/
 ├── bridge/            bridge.js 源码（原生 JS，注入原型 iframe）
+├── skills/            平台配套的 AI 协作技能（见 §7）
 ├── tests/             契约测试 fixture 与 E2E（Playwright）
-└── docs/              POC 报告、部署文档（skill 指令文档随 Agent 方案二期再建）
+└── docs/              POC 报告、部署文档
 ```
+
+### 1.1 skills/ 目录（平台配套 AI 技能）
+
+存放随平台仓库分发的 AI 协作技能（每个子目录一个技能，含 `SKILL.md` 与可选脚本），供打锚点、内容生产等协作场景使用：
+
+- `skills/prd-html-anchor/`：PRD ↔ HTML 原型双向锚点关联技能。含自检脚本 `check_orphan_anchors.py`（零依赖）：检查两侧孤儿锚点、重复 ID、PRD 锚点单独成行、命名违规，同时识别静态 `data-pa` 与 JS `setAttribute` 动态注入；退出码 0/1/2 可作 CI 门禁。用法与平台项目目录同构：`python skills/prd-html-anchor/check_orphan_anchors.py <项目目录>`（下含 prd/ 与 prototype/）。
+- `skills/comment-revision-plan/`：评论导出包解压与修改计划梳理技能。消费平台评论导出 zip（manifest + comments + shots），含解压摘要脚本 `unpack_comments.py`（零依赖、安全解压）：解压导出包、逐条读评论、筛出「已确认待修改」并按宿主（PRD 文档/原型）分组输出定位提示；退出码 0/1/2。技能主流程：逐条梳理修改方案（PRD 评论→定位段落+判断原型联动；原型评论→定位元素+判断 PRD 联动，无 PRD 关联的原型评论需补 PRD 描述），不确定处提问产品经理，最终交付 PRD 与原型两份修改计划 md；**只产出计划，不执行修改**。这是二期 Agent 闭环（架构调整方案 §13 开放问题 1）中「导出包作为 Agent 输入契约」形态的先行落地。
 
 ## 2 常用命令
 
