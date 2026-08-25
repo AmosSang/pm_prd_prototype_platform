@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
 import { currentUser } from '../auth'
+import { PROTO_ORIGIN } from '../proto-origin'
 import CommentBox from '../components/CommentBox.vue'
 import CommentDrawer from '../components/CommentDrawer.vue'
 import {
@@ -50,8 +51,6 @@ import {
 
 const route = useRoute()
 const slug = route.params.slug as string
-
-const PROTO_ORIGIN = 'http://localhost:8081'
 
 function makeNonce(): string {
   const bytes = new Uint8Array(16)

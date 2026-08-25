@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-
-const PROTO_ORIGIN = 'http://localhost:8081'
+import { PROTO_ORIGIN } from '../proto-origin'
 // T1.3 三场景：登录页（基础）/ modal（带弹窗）/ scroll（长页滚动）
 const SCENARIOS: Record<string, { page: string; target: string; label: string }> = {
   login: { page: '/proto/demo/prototype/pages/login.html', target: '#captcha', label: '登录页（基础）' },
