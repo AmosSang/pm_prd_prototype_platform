@@ -75,7 +75,7 @@ const iframeSrc = computed(() =>
     : '',
 )
 
-const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox'
+const sandboxAttr = 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox'
 const ready = ref(false)
 const anchorCount = ref(0) // 本页锚点数（ANCHOR_REPORT 更新，右上角显示）
 

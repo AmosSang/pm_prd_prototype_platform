@@ -7,10 +7,11 @@ test.describe('T1.1 沙箱 iframe + bridge.js 往返', () => {
     await page.goto('/demo/bridge')
   })
 
-  test('iframe 以 sandbox 属性加载，且无 allow-same-origin', async ({ page }) => {
+  test('iframe 以 sandbox 属性加载，且含 allow-same-origin（内部系统不收紧）', async ({ page }) => {
     const sandbox = await page.getAttribute('[data-testid="proto-frame"]', 'sandbox')
     expect(sandbox).toBeTruthy()
-    expect(sandbox).not.toContain('allow-same-origin')
+    // T 决策：内部原型系统不收紧，放开 allow-same-origin 让原型可用 localStorage
+    expect(sandbox).toContain('allow-same-origin')
   })
 
   test('代理注入：原型 HTML 响应含 bridge.js 标签', async ({ request }) => {

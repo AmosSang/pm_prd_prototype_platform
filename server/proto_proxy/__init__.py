@@ -22,29 +22,6 @@ PROJECT_ID = re.compile(r"^[a-z0-9-]{1,32}$")
 
 INJECT_TAG = '<script src="/bridge.js"></script>'
 
-# T 增强：沙箱无 allow-same-origin 时（不透明 origin）访问 localStorage/sessionStorage
-# 抛 SecurityError。注入内存版垫片（仅当原取用真的会抛错时替换），让使用 storage 的
-# 原型不崩，同时保留隔绝宿主 cookie / storage 的隔离设计。纯 ASCII，避免改变文档编码。
-_STORAGE_SHIM_JS = (
-    "(function(){"
-    "function mk(){var d=Object.create(null),keys=[];"
-    "return{"
-    "getItem:function(k){return k in d?d[k]:null},"
-    "setItem:function(k,v){var key=String(k);if(!(key in d))keys.push(key);d[key]=String(v)},"
-    "removeItem:function(k){var key=String(k);if(key in d){delete d[key];keys=keys.filter(function(x){return x!==key})}},"
-    "clear:function(){d=Object.create(null);keys=[]},"
-    "key:function(i){return keys[i]||null},"
-    "get length(){return keys.length}"
-    "}}"
-    "function install(name){var store=mk();"
-    "Object.defineProperty(window,name,{get:function(){return store},configurable:true})}"
-    "function probe(name){try{void window[name].getItem('__ppp_probe__')}catch(e){return true}return false}"
-    "if(probe('localStorage'))install('localStorage');"
-    "if(probe('sessionStorage'))install('sessionStorage');"
-    "})();"
-)
-STORAGE_SHIM_TAG = "<script>" + _STORAGE_SHIM_JS + "</script>"
-
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -90,33 +67,12 @@ def _resolve(project_id: str, rel_path: str) -> str:
 
 
 def inject_bridge(html: str) -> str:
-    """注入两段：
-    1) 文档最前注入 localStorage/sessionStorage 内存垫片（早于原型脚本，沙箱里读
-       storage 不抛 SecurityError；仅在真的会抛错时替换，保留隔离）；
-    2) </body> 前注入 bridge.js（无 </body> 时追加末尾）。
-    幂等：垫片与 bridge.js 各只注入一次。
-    """
-    if STORAGE_SHIM_TAG not in html:
-        html = _inject_early(html, STORAGE_SHIM_TAG)
-    if INJECT_TAG not in html:
-        if "</body>" in html:
-            html = html.replace("</body>", INJECT_TAG + "</body>", 1)
-        else:
-            html = html + INJECT_TAG
-    return html
-
-
-def _inject_early(html: str, tag: str) -> str:
-    """把 tag 插到 <head> 之后（早于原型脚本）；无 <head> 则插到 <body 前；再无则文档最前。"""
-    m = re.search(r"<head[^>]*>", html, re.I)
-    if m:
-        pos = m.end()
-        return html[:pos] + tag + html[pos:]
-    m = re.search(r"<body[^>]*>", html, re.I)
-    if m:
-        pos = m.start()
-        return html[:pos] + tag + html[pos:]
-    return tag + html
+    """在 </body> 前注入 bridge.js；无 </body> 时追加到末尾（遗留决策点 3 的兜底）。"""
+    if INJECT_TAG in html:
+        return html
+    if "</body>" in html:
+        return html.replace("</body>", INJECT_TAG + "</body>", 1)
+    return html + INJECT_TAG
 
 
 @bp.get("/bridge.js")

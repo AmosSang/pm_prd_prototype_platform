@@ -2,14 +2,13 @@ import { expect, test } from '@playwright/test'
 import { createProjectWithContent } from './helpers'
 
 /**
- * T 增强 沙箱原型 localStorage：
- * 生产/查看器原型 iframe 用 `sandbox` 且不带 allow-same-origin（不透明 origin），
- * 沙箱里直接访问 localStorage/sessionStorage 会抛 SecurityError。proto_proxy 在
- * 原型文档最前注入内存版垫片，让使用 storage 的原型不崩、且保留隔离。
+ * 沙箱原型 localStorage：
+ * 查看器原型 iframe 用 `sandbox` 且**带 allow-same-origin**（T 决策：内部原型系统
+ * 不收紧），iframe 拥有真实 origin，可直接访问 localStorage/sessionStorage。
  *
  * 本用例原型 <head> 里直接 `localStorage.setItem`（不 try/catch，复现用户报错场景），
- * 成功后在 DOMContentLoaded 追加 `#ppp-storage-result`（内容 'ok'）——若沙箱抛错
- * 该 script 中断、div 不会创建，断言即失败；同时收集页面 error 断言无 SecurityError。
+ * 成功后在 DOMContentLoaded 追加 `#ppp-storage-result`（内容 'ok'）——若沙箱仍抛
+ * SecurityError，该 script 中断、div 不会创建，断言即失败；同时收集页面 error 断言无 SecurityError。
  */
 const PROTO = {
   'index.html': `<!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -27,7 +26,7 @@ const PROTO = {
 }
 
 test.describe('T 增强 沙箱原型 localStorage', () => {
-  test('原型用 localStorage 不抛 SecurityError（内存垫片生效）', async ({ page, request }) => {
+  test('原型用 localStorage 不抛 SecurityError（allow-same-origin 生效）', async ({ page, request }) => {
     const proj = await createProjectWithContent(request, `存储E2E-${Date.now().toString(36)}`, {
       protoFiles: PROTO,
     })

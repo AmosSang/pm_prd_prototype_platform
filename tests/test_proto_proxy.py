@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from server.proto_proxy import PROJECT_ID, STORAGE_SHIM_TAG, _resolve, inject_bridge
+from server.proto_proxy import PROJECT_ID, _resolve, inject_bridge
 
 
 def test_project_id_pattern():
@@ -41,10 +41,7 @@ def test_inject_bridge():
     html = "<html><body><h1>hi</h1></body></html>"
     out = inject_bridge(html)
     assert '<script src="/bridge.js"></script></body>' in out
-    # 存储垫片注入且早于 <body>（沙箱无 allow-same-origin 读 localStorage 不崩）
-    assert STORAGE_SHIM_TAG in out
-    assert out.index(STORAGE_SHIM_TAG) < out.index("<body>")
-    # 幂等：重复注入不再叠加（垫片与 bridge 各只一次）
+    # 幂等：重复注入不再叠加
     assert inject_bridge(out) == out
     # 无 </body> 兜底：追加末尾
     assert inject_bridge("<html><h1>hi</h1></html>").endswith(

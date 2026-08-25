@@ -136,7 +136,7 @@ watch(sceneKey, () => {
           </button>
         </div>
         <iframe id="proto-frame" :key="sceneKey" :src="iframeSrc"
-          sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
           data-testid="proto-frame" />
       </div>
 

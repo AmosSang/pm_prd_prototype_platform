@@ -16,7 +16,7 @@ const iframeSrc = ref(`${PROTO_ORIGIN}${DEMO_PAGE}#pp-nonce=${nonce}`)
 
 const ready = ref(false)
 const echoed = ref(false)
-const sandboxAttr = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox'
+const sandboxAttr = 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox'
 const logs = ref<string[]>([])
 
 function log(msg: string) {
