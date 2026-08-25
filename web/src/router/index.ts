@@ -27,14 +27,25 @@ const router = createRouter({
       name: 'viewer',
       component: () => import('../views/Viewer.vue'),
     },
+    {
+      // T2.1 用户管理（仅超管）
+      path: '/users',
+      name: 'users',
+      component: () => import('../views/UserManage.vue'),
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 
-// T2.2：全局守卫——未登录一律去 /login（带 back 来源）
+// T2.2：全局守卫——未登录一律去 /login（带 back 来源）；
+// requiresAdmin 路由：非超管重定向回首页
 router.beforeEach((to) => {
   if (to.name === 'login') return true
   if (!currentUser.value) {
     return { name: 'login', query: { back: to.fullPath } }
+  }
+  if (to.meta.requiresAdmin && !currentUser.value.is_admin) {
+    return { name: 'home' }
   }
   return true
 })

@@ -20,6 +20,9 @@ SHOT_MAX_BYTES = 10 * 1024 * 1024          # 截图 ≤ 10MB
 
 PLATFORM_SECRET = os.environ.get("PLATFORM_SECRET", "dev-secret-change-me")
 
+# 超级管理员邮箱（T2.1 增强）：初始启动时写入 users 表为超管（name=admin，is_admin=True）
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
+
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "25"))
 SMTP_USER = os.environ.get("SMTP_USER", "")

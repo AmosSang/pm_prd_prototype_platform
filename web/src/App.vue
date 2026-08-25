@@ -15,6 +15,9 @@ async function onLogout() {
     <header v-if="currentUser" class="app-bar" data-testid="app-bar">
       <span class="brand">产品方案展示平台</span>
       <span class="spacer" />
+      <router-link v-if="currentUser.is_admin" class="admin-link" data-testid="user-manage" to="/users">
+        用户管理
+      </router-link>
       <span class="user" data-testid="current-user">{{ currentUser.name }}（{{ currentUser.email }}）</span>
       <a class="logout" data-testid="logout" @click.prevent="onLogout">退出</a>
     </header>
@@ -38,4 +41,6 @@ async function onLogout() {
 .spacer { flex: 1; }
 .user { color: #c8ccd4; }
 .logout { color: #8ab4ff; cursor: pointer; }
+.admin-link { color: #8ab4ff; text-decoration: none; }
+.admin-link:hover { text-decoration: underline; }
 </style>

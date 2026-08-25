@@ -111,6 +111,8 @@ def request_code():
     user = User.get_or_none(User.email == email)
     if not user:
         return _err("该邮箱未开通访问权限，请联系管理员", 403)
+    if user.disabled:
+        return _err("账号已停用，请联系管理员", 403)
 
     # 频控：同邮箱 60s 内仅 1 条
     last = (
@@ -157,6 +159,8 @@ def verify():
     user = User.get_or_none(User.email == email)
     if not user:
         return _err("该邮箱未开通访问权限，请联系管理员", 403)
+    if user.disabled:
+        return _err("账号已停用，请联系管理员", 403)
 
     vc = (
         VerificationCode.select()
@@ -182,7 +186,11 @@ def verify():
     session["uid"] = user.id
     session["email"] = user.email
     session["name"] = user.name
-    return jsonify(code=0, data={"user": {"id": user.id, "email": user.email, "name": user.name}}), 200
+    session["is_admin"] = user.is_admin
+    return jsonify(
+        code=0,
+        data={"user": {"id": user.id, "email": user.email, "name": user.name, "is_admin": user.is_admin}},
+    ), 200
 
 
 @bp.post("/logout")
@@ -200,7 +208,13 @@ def me():
     if not user:
         session.clear()
         return _err("未登录", 401)
-    return jsonify(code=0, data={"user": {"id": user.id, "email": user.email, "name": user.name}}), 200
+    if user.disabled:
+        session.clear()
+        return _err("账号已停用，请联系管理员", 401)
+    return jsonify(
+        code=0,
+        data={"user": {"id": user.id, "email": user.email, "name": user.name, "is_admin": user.is_admin}},
+    ), 200
 
 
 def apply_auth_to_app(app):

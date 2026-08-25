@@ -11,7 +11,7 @@ import datetime as dt
 
 import peewee
 
-from server.config import DB_PATH
+from server.config import ADMIN_EMAIL, DB_PATH
 
 
 def utcnow_str() -> str:
@@ -47,6 +47,8 @@ class User(BaseModel):
     name = peewee.CharField(null=False)
     # admin 标记：一期管理员由 CLI/DB 工具直接维护，不提供界面
     is_admin = peewee.BooleanField(default=False)
+    # 停用标志（T2.1 用户管理）：停用后不发验证码、已登录调用接口即 401 强制登出
+    disabled = peewee.BooleanField(default=False)
     created_at = peewee.CharField(default=utcnow_str)
 
 
@@ -108,3 +110,36 @@ def init_tables() -> None:
     """建表（幂等）。应用启动与测试 fixture 共用。"""
     db.connect(reuse_if_open=True)
     db.create_tables([User, VerificationCode, Project, Comment], safe=True)
+    _migrate()
+    seed_admin()
+
+
+def _migrate() -> None:
+    """轻量迁移：旧库补 user.disabled 列（create_tables 不改已存在的表）。
+
+    注意：peewee 默认表名 = 模型类名小写（User → user），不是 users。
+    """
+    tbl = User._meta.table_name
+    try:
+        db.execute_sql(f"ALTER TABLE {tbl} ADD COLUMN disabled BOOLEAN NOT NULL DEFAULT 0")
+    except Exception:  # noqa: BLE001 —— 列已存在/等无关错误，忽略
+        pass
+
+
+def seed_admin() -> None:
+    """按 ADMIN_EMAIL 环境变量种子超级管理员（幂等，多方启动只保证一次）。
+
+    不存在则创建（name=admin）；已存在则确保 is_admin=True。
+    """
+    if not ADMIN_EMAIL:
+        return
+    email = ADMIN_EMAIL.strip().lower()
+    if not email:
+        return
+    user = User.get_or_none(User.email == email)
+    if user:
+        if not user.is_admin:
+            user.is_admin = True
+            user.save()
+        return
+    User.create(email=email, name="admin", is_admin=True)

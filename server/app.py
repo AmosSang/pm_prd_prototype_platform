@@ -15,6 +15,7 @@ from server.projects import bp as projects_bp
 from server.proto_proxy import bp as proto_proxy_bp
 from server.reviews import bp as reviews_bp
 from server.shots import bp as shots_bp
+from server.users import bp as users_bp
 
 
 def create_app() -> Flask:
@@ -29,6 +30,7 @@ def create_app() -> Flask:
     app.register_blueprint(proto_proxy_bp)
     app.register_blueprint(shots_bp)
     app.register_blueprint(reviews_bp)
+    app.register_blueprint(users_bp)
 
     init_tables()
 
@@ -39,11 +41,21 @@ def create_app() -> Flask:
     def require_login():
         from flask import request, session
 
+        from server.models import User
+
         p = request.path
         if p.startswith("/api/auth/") or p == "/api/health" or not p.startswith("/api/"):
             return None
-        if not session.get("uid"):
+        uid = session.get("uid")
+        if not uid:
             return jsonify(code=401, msg="未登录"), 401
+        # T2.1 用户停用：已登录账号任意接口调用即 401（清 session 强制登出）。
+        # 注意：仅当 DB 有该用户且 disabled 时才拦截——兼容既有测试 fixture
+        # 直接造 session（uid 无对应 User 记录）的场景。
+        user = User.get_or_none(User.id == uid)
+        if user is not None and user.disabled:
+            session.clear()
+            return jsonify(code=401, msg="账号已停用，请联系管理员"), 401
         return None
 
     @app.get("/api/health")
