@@ -16,7 +16,15 @@ from email.mime.text import MIMEText
 
 from flask import Blueprint, jsonify, request, session
 
-from server.config import PLATFORM_SECRET, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER
+from server.config import (
+    PLATFORM_SECRET,
+    SMTP_FROM,
+    SMTP_HOST,
+    SMTP_PASS,
+    SMTP_PORT,
+    SMTP_USE_SSL,
+    SMTP_USER,
+)
 from server.models import User, VerificationCode, parse_utc, utcnow_str
 
 
@@ -66,14 +74,22 @@ def _send_code_email(to_email: str, code: str) -> None:
     )
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = SMTP_USER or "noreply@platform.local"
+    msg["From"] = SMTP_FROM or SMTP_USER or "noreply@platform.local"
     msg["To"] = to_email
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
-        if SMTP_USER and SMTP_PASS:
-            smtp.starttls()
-            smtp.login(SMTP_USER, SMTP_PASS)
-        smtp.sendmail(msg["From"], [to_email], msg.as_string())
+    if SMTP_USE_SSL:
+        # 隐式 SSL（163 的 465/994 等）：连接即加密，无需 starttls
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+            if SMTP_USER and SMTP_PASS:
+                smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.sendmail(msg["From"], [to_email], msg.as_string())
+    else:
+        # 明文或 STARTTLS（587 等）：有账号密码时先 upgrade 到 TLS 再登录
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+            if SMTP_USER and SMTP_PASS:
+                smtp.starttls()
+                smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.sendmail(msg["From"], [to_email], msg.as_string())
 
 
 def _err(msg: str, status: int, extra: dict | None = None):
