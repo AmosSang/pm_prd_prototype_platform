@@ -340,3 +340,31 @@ test.describe('T 增强 同行多锚点', () => {
     })
   })
 })
+
+test.describe('T 增强 原型内部跳转', () => {
+  test('a 标签跳页后点锚点仍能定位 PRD（nonce 跨页恢复）', async ({ page, request }) => {
+    const proj = await createProjectWithContent(request, `内跳-${Date.now().toString(36)}`, {
+      protoFiles: {
+        'index.html': '<a href="page2.html">去第二页</a>',
+        'page2.html': '<main data-pa="page-main-2">第二页主块</main>',
+      },
+      prdFile: {
+        name: '需求.md',
+        content: '# 内部跳转 PRD\n\n## 1 第二页\n\n第二页说明。 <!-- pa: page-main-2 -->\n',
+      },
+    })
+
+    await openViewer(page, proj, 'p[data-pa="page-main-2"]')
+    const protoFrame = page.frameLocator('[data-testid="viewer-proto-frame"]')
+    // 触发原型内部跳转（a 标签，不带 #pp-nonce → 修复前会丢 nonce 导致定位失灵）
+    await protoFrame.locator('a[href="page2.html"]').click()
+    const main = protoFrame.locator('[data-pa="page-main-2"]')
+    await expect(main).toBeVisible({ timeout: 10_000 })
+    await main.hover()
+    const icon = protoFrame.locator('.pp-anchor-icon')
+    await expect(icon).toBeVisible({ timeout: 5_000 })
+    await icon.click()
+    const target = page.getByTestId('prd-content').locator('p[data-pa="page-main-2"]')
+    await expect(target).toHaveClass(/anchor-highlight/, { timeout: 3_000 })
+  })
+})
