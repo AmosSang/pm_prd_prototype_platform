@@ -418,13 +418,15 @@ def create_comment(pid: int):
 # ───────────────────────── 评论列表 / 编辑 / 删除 / 批量状态（T4.4）──────────
 
 # 状态四态（产品方案 §3.4）：待确认 → 已确认待修改 → 已修改；忽略为旁路。
-# 可编辑/可删除态：待确认、已确认待修改（已修改/忽略只读，返工走 T5.2）
+# 可编辑/可删除态：待确认、已确认待修改（已修改/忽略只读，返工走 rework）
 EDITABLE_STATUSES = ("待确认", "已确认待修改")
 
-# 批量动作的合法源状态（batch-status 状态机）
+# 批量动作的合法源状态（batch-status 状态机；T8.4 收口为仅创建者 + 状态闭环）
 BATCH_ACTIONS = {
     "confirm": {"from": ("待确认",), "to": "已确认待修改"},
     "ignore": {"from": ("待确认", "已确认待修改"), "to": "忽略"},
+    "mark_done": {"from": ("已确认待修改",), "to": "已修改"},
+    "rework": {"from": ("已修改",), "to": "已确认待修改"},
 }
 
 
@@ -487,10 +489,14 @@ def edit_comment(cid: str):
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法编辑"), 400
-    if c.author_email != session.get("email"):
-        return jsonify(code=403, msg="仅评论作者可编辑"), 403
-    if c.status not in EDITABLE_STATUSES:
-        return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
+    # T8.4 权限收口（§6）：创建者编辑任意评论不受状态限制；作者限自己的
+    # 评论且仅待确认/已确认待修改态。
+    is_creator = session.get("uid") == c.project.creator_id
+    if not is_creator:
+        if c.author_email != session.get("email"):
+            return jsonify(code=403, msg="仅评论作者或项目创建者可编辑"), 403
+        if c.status not in EDITABLE_STATUSES:
+            return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
 
     data = request.get_json(silent=True) or {}
     fields: dict = {}
@@ -538,10 +544,14 @@ def delete_comment(cid: str):
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法删除"), 400
-    if c.author_email != session.get("email"):
-        return jsonify(code=403, msg="仅评论作者可删除"), 403
-    if c.status not in EDITABLE_STATUSES:
-        return jsonify(code=400, msg=f"「{c.status}」状态的评论不可删除"), 400
+    # T8.4 权限收口（§6）：创建者删除任意评论不受状态限制；作者限自己的
+    # 评论且仅待确认/已确认待修改态。
+    is_creator = session.get("uid") == c.project.creator_id
+    if not is_creator:
+        if c.author_email != session.get("email"):
+            return jsonify(code=403, msg="仅评论作者或项目创建者可删除"), 403
+        if c.status not in EDITABLE_STATUSES:
+            return jsonify(code=400, msg=f"「{c.status}」状态的评论不可删除"), 400
 
     c.deleted = True
     c.updated_at = utcnow_str()
@@ -556,12 +566,12 @@ def delete_comment(cid: str):
 
 @bp.post("/api/comments/batch-status")
 def batch_status():
-    """批量状态流转（产品方案 §4.5：PM 批量确认/忽略）。
+    """批量状态流转（产品方案 §4.5：PM 批量确认/忽略；T8.4 收口为仅创建者）。
 
     状态机：confirm（待确认 → 已确认待修改）、ignore（待确认/已确认待修改
-    → 忽略）。返工（已修改 → 已确认待修改）是 T5.2 范围。逐条：合法则
-    DB 更新 + 直接改写项目目录内评论 JSON（T8.1 去 Git 本地化），非法
-    （状态不符/不存在）跳过并报告。
+    → 忽略）、mark_done（已确认待修改 → 已修改）、rework（已修改 → 已确认
+    待修改，返工闭环）。逐条：合法则 DB 更新 + 直接改写项目目录内评论 JSON
+    （T8.1 去 Git 本地化），非法（状态不符/不存在/跨项目/非创建者）跳过并报告。
     """
     data = request.get_json(silent=True) or {}
     action = str(data.get("action") or "")
@@ -578,6 +588,10 @@ def batch_status():
         c = _get_live_comment(str(cid))
         if not c:
             skipped.append({"comment_id": str(cid), "reason": "不存在"})
+            continue
+        # T8.4 权限收口（§6）：状态流转仅创建者可操作；且批量条目须属创建者项目
+        if session.get("uid") != c.project.creator_id:
+            skipped.append({"comment_id": c.comment_id, "reason": "仅项目创建者可操作状态"})
             continue
         if not c.project.commentable:
             skipped.append({"comment_id": c.comment_id, "reason": "项目已关闭评论"})

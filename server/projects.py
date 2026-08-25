@@ -106,15 +106,17 @@ def list_projects():
 
 @bp.patch("/<int:pid>")
 def update_project(pid: int):
-    """项目设置更新（T4.5）：commentable 可评论开关。
+    """项目设置更新（T4.5 / T8.4 收权）：commentable 可评论开关，仅创建者。
 
     产品方案 §4.5：默认开启；关闭后全员评论入口置灰、一切写评论操作
-    被拦截（已有评论仍可查看）。T8.4 将收权为仅创建者可操作（本卡先
-    保持登录用户均可，前端按钮 T8.4 一并按 is_creator 显隐）。
+    被拦截（已有评论仍可查看）。T8.4 起仅项目创建者可开关（§6 权限矩阵）。
     """
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
+    deny = _require_creator(p)
+    if deny:
+        return deny
 
     data = request.get_json(silent=True) or {}
     if "commentable" not in data:

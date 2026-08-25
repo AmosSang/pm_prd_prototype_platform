@@ -236,7 +236,7 @@ export function deleteComment(cid: string): Promise<{ comment_id: string; delete
 
 export function batchStatus(
   cids: string[],
-  action: 'confirm' | 'ignore',
+  action: 'confirm' | 'ignore' | 'mark_done' | 'rework',
 ): Promise<{ action: string; to: string; updated: string[]; skipped: { comment_id: string; reason: string }[] }> {
   return api.post('/api/comments/batch-status', { cids, action })
 }

@@ -751,9 +751,11 @@ onBeforeUnmount(() => {
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
       <span class="meta">{{ slug }} · 创建者 {{ overview.project.creator.name }}</span>
-      <!-- T4.5 项目级「可评论」开关：关闭后全员评论入口置灰（已有评论可查看）。
-           PM 驱动 Agent 修改前关闭，同步刷新后再开启（消除 reviews/ 双写窗口） -->
+      <!-- T4.5 项目级「可评论」开关（T8.4 收权：仅创建者可见可操作）：
+           关闭后全员评论入口置灰（已有评论可查看）。PM 驱动 Agent 修改前关闭，
+           同步刷新后再开启（消除 reviews/ 双写窗口） -->
       <span
+        v-if="overview.project.is_creator"
         class="comment-toggle"
         title="项目级开关：关闭后全员无法新增评论（已有评论仍可查看）；驱动 Agent 修改前建议关闭"
       >
@@ -942,6 +944,7 @@ onBeforeUnmount(() => {
       :current-user-email="currentUser?.email || ''"
       :focus-key="drawerFocusKey"
       :commentable="commentable"
+      :is-creator="overview.project.is_creator"
       @refresh="refreshComments"
       @locate="locateComment"
     />
