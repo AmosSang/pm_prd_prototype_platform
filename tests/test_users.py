@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.app import create_app  # noqa: E402
-from server.models import User, db, init_tables  # noqa: E402
+from server.models import User, db, init_tables, seed_admin  # noqa: E402
 
 
 @pytest.fixture()
@@ -74,6 +74,19 @@ class TestSeedAdmin:
         _app, _sent = app
         init_tables()
         assert User.select().where(User.is_admin == True).count() == 1  # noqa: E712
+
+    def test_seed_promotes_existing_non_admin_no_unique_error(self, app, monkeypatch):
+        """已存在普通用户（同 ADMIN_EMAIL）→ seed_admin 仅提升 is_admin，不抛 UNIQUE。
+
+        对应多 worker 并发启动：get_or_create 撞唯一约束会回退查询而非崩溃。
+        """
+        _app, _sent = app
+        u = User.get_or_none(User.email == "pm@corp.com")
+        assert u is not None and u.is_admin is False
+        monkeypatch.setattr("server.models.ADMIN_EMAIL", "pm@corp.com")
+        seed_admin()  # 已存在 → 提升，不抛 IntegrityError
+        u2 = User.get_or_none(User.email == "pm@corp.com")
+        assert u2.is_admin is True
 
 
 class TestDisabledLogin:
