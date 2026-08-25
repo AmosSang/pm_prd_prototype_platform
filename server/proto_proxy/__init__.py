@@ -22,6 +22,33 @@ PROJECT_ID = re.compile(r"^[a-z0-9-]{1,32}$")
 
 INJECT_TAG = '<script src="/bridge.js"></script>'
 
+# T 增强：早期自愈护栏（注入 <head>）。原型自身的脚本可能在解析/运行时崩溃或改写
+# 文档（document.write 整页重写、body.innerHTML 替换等），导致 </body> 前注入的
+# bridge.js 标签被销毁、bridge 永不运行 → 查看器永久「加载中…」且锚点失效。
+# 护栏：先记住 URL hash 里的 nonce 到 window.__PP_NONCE__（bridge 幂等读取），
+# 再在 DOMContentLoaded 后轮询补挂 bridge.js，直到 bridge 上报 __PP_BRIDGE__。
+_BRIDGE_GUARD_JS = (
+    "(function(){"
+    "var m=/(?:^|#)pp-nonce=([A-Za-z0-9_-]+)/.exec(location.hash);"
+    "try{window.__PP_NONCE__=m?m[1]:window.__PP_NONCE__||null}catch(e){}"
+    "var tries=0;"
+    "function ensure(){"
+    "try{"
+    "if(window.__PP_BRIDGE__)return;"
+    "var s=document.querySelector('script[data-pp-bridge]');"
+    "if(!s){s=document.createElement('script');s.setAttribute('data-pp-bridge','1');"
+    "s.src='/bridge.js';var h=document.head||document.documentElement;"
+    "(document.body||h).appendChild(s)}"
+    "if(!window.__PP_BRIDGE__&&tries++<40)setTimeout(ensure,250)"
+    "}catch(e2){}"
+    "}"
+    "if(document.readyState==='loading'){"
+    "document.addEventListener('DOMContentLoaded',ensure)"
+    "}else{ensure()}"
+    "})();"
+)
+BRIDGE_GUARD_TAG = "<script>" + _BRIDGE_GUARD_JS + "</script>"
+
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -67,12 +94,28 @@ def _resolve(project_id: str, rel_path: str) -> str:
 
 
 def inject_bridge(html: str) -> str:
-    """在 </body> 前注入 bridge.js；无 </body> 时追加到末尾（遗留决策点 3 的兜底）。"""
-    if INJECT_TAG in html:
+    """注入两段：
+    1) <head> 后注入早期护栏（记住 nonce + 崩溃后自愈补挂 bridge.js）；
+    2) </body> 前注入 bridge.js（无 </body> 时追加末尾）。
+    幂等：护栏与 bridge 各只注入一次。
+    """
+    if BRIDGE_GUARD_TAG not in html:
+        html = _inject_into_head(html, BRIDGE_GUARD_TAG)
+    if INJECT_TAG not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", INJECT_TAG + "</body>", 1)
+        else:
+            html = html + INJECT_TAG
+    return html
+
+
+def _inject_into_head(html: str, tag: str) -> str:
+    """把 tag 插到 <head> 之后；无 <head> 则跳过（退化仅靠 </body> 前注入）。"""
+    m = re.search(r"<head[^>]*>", html, re.I)
+    if not m:
         return html
-    if "</body>" in html:
-        return html.replace("</body>", INJECT_TAG + "</body>", 1)
-    return html + INJECT_TAG
+    pos = m.end()
+    return html[:pos] + tag + html[pos:]
 
 
 @bp.get("/bridge.js")
