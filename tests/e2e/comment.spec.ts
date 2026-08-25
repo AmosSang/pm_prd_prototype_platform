@@ -320,10 +320,11 @@ test.describe('T4.2 评论提交链路', () => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
 
-    // 点锚点元素 → 评论框 → 填写提交（P1）
+    // 点锚点元素 → 评论框 → 填写提交（T 增强：表单不含优先级/范围）
     await protoFrame.locator('[data-pa="login-account"]').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    await page.getByTestId('comment-priority').selectOption('P1')
+    await expect(page.getByTestId('comment-priority')).toHaveCount(0)
+    await expect(page.getByTestId('comment-scope')).toHaveCount(0)
     const data = await submitAndWait(page, '验证码发送后按钮要进入 60s 倒计时禁用态')
     const cid: string = data.comment_id
     expect(cid).toMatch(/^c-\d{8}-\d{3}$/)
@@ -341,8 +342,8 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.comment_id).toBe(cid)
     expect(fj.status).toBe('待确认')
     expect(fj.author).toBe('E2E测试员')
-    expect(fj.priority).toBe('P1')
-    expect(fj.scope).toBe('prototype')
+    expect(fj.priority).toBeUndefined()  // T 增强：已移除字段
+    expect(fj.scope).toBeUndefined()
     expect(fj.content).toContain('倒计时禁用态')
     expect(fj.target_type).toBe('dom')
     expect(fj.anchor_id).toBe('login-account')
@@ -405,8 +406,8 @@ test.describe('T4.2 评论提交链路', () => {
     expect(fj.doc_excerpt).toContain('账号输入')
     // fingerprint：标题路径 + 段落文本 sha1 前 16 位（hex）
     expect(fj.doc_block_fingerprint).toMatch(/^[0-9a-f]{16}$/)
-    // scope 默认按宿主推断：文档评论 → doc
-    expect(fj.scope).toBe('doc')
+    // T 增强：已移除 scope 字段
+    expect(fj.scope).toBeUndefined()
     // 文档评论无截图（目标是 PRD 段落，非原型）
     expect(fj.screenshot).toBeUndefined()
   })
@@ -469,11 +470,12 @@ test.describe('T4.4 评论列表抽屉', () => {
     for (const c of cids) {
       await page.getByTestId(`ck-${c}`).check()
     }
-    // 批量确认
+    // T 增强：单个「批量修改状态」按钮 → 菜单选择目标状态「已确认待修改」
     const respPromise = page.waitForResponse(
       (r) => r.url().includes('/batch-status') && r.request().method() === 'POST',
     )
-    await page.getByTestId('batch-confirm').click()
+    await page.getByTestId('batch-status-btn').click()
+    await page.getByTestId('batch-to-已确认待修改').click()
     const resp = await respPromise
     expect(resp.status()).toBe(200)
     expect((await resp.json()).data.updated).toHaveLength(2)
@@ -684,8 +686,7 @@ test.describe('T4.5 项目级可评论开关', () => {
     // T4.5 修订：写 reviews/ 的操作全部置灰/隐藏——
     // 勾选评论后批量按钮仍 disabled；编辑/删除按钮不出现
     await page.getByTestId(`ck-${d.comment_id}`).check()
-    await expect(page.getByTestId('batch-confirm')).toBeDisabled()
-    await expect(page.getByTestId('batch-ignore')).toBeDisabled()
+    await expect(page.getByTestId('batch-status-btn')).toBeDisabled()
     await expect(page.getByTestId('edit-comment')).toHaveCount(0)
     await expect(page.getByTestId('del-comment')).toHaveCount(0)
 
@@ -696,7 +697,7 @@ test.describe('T4.5 项目级可评论开关', () => {
     })
     await expect(page.getByTestId('commentable-toggle')).toHaveClass(/is-checked/)
     await expect(page.getByTestId('edit-comment')).toHaveCount(1)
-    await expect(page.getByTestId('batch-confirm')).not.toBeDisabled()
+    await expect(page.getByTestId('batch-status-btn')).not.toBeDisabled()
   })
 })
 
@@ -730,7 +731,7 @@ test.describe('T8.3 评论导出', () => {
 
     // 确认 d1 →「已确认待修改」（交付修改的标准范围）
     const r = await page.request.post('/api/comments/batch-status', {
-      data: { cids: [d1.comment_id], action: 'confirm' },
+      data: { cids: [d1.comment_id], status: '已确认待修改' },
     })
     expect(r.ok()).toBeTruthy()
 
@@ -795,7 +796,7 @@ test.describe('T8.5 评论抽屉增强', () => {
     }
     // 确认两条 → 已确认待修改
     const r = await page.request.post('/api/comments/batch-status', {
-      data: { cids, action: 'confirm' },
+      data: { cids, status: '已确认待修改' },
     })
     expect(r.ok()).toBeTruthy()
 
@@ -810,10 +811,11 @@ test.describe('T8.5 评论抽屉增强', () => {
       page.locator(`[data-cid="${cids[0]}"] [data-testid="comment-status"]`),
     ).toHaveText('已修改')
 
-    // 批量：勾选另一条（已确认待修改）→ 批量标记已修改
+    // 批量：勾选另一条（已确认待修改）→ 批量菜单改状态为「已修改」
     await expect(page.getByTestId(`ck-${cids[1]}`)).toBeVisible()
     await page.getByTestId(`ck-${cids[1]}`).check()
-    await page.getByTestId('batch-mark-done').click()
+    await page.getByTestId('batch-status-btn').click()
+    await page.getByTestId('batch-to-已修改').click()
     await expect(
       page.locator(`[data-cid="${cids[1]}"] [data-testid="comment-status"]`),
     ).toHaveText('已修改')
@@ -918,16 +920,16 @@ test.describe('T8.5 评论抽屉增强', () => {
 // ═══════════════════ T8.6 弹窗精简 + 右侧抽屉三栏 ═══════════════════
 
 test.describe('T8.6 弹窗精简与抽屉右侧化', () => {
-  test('评论弹窗只显示内容/优先级/范围（无 payload 属性摘要）', async ({ page }) => {
+  test('评论弹窗只显示内容（无优先级/范围/payload 属性摘要）', async ({ page }) => {
     const protoFrame = await openViewer(page)
     await enableCommentMode(page)
     await protoFrame.locator('[data-pa="login-account"]').click()
     await expect(page.getByTestId('comment-box')).toBeVisible()
-    // 只保留内容/优先级/范围
+    // T 增强：只保留内容（优先级/范围已移除）
     await expect(page.getByTestId('comment-content')).toBeVisible()
-    await expect(page.getByTestId('comment-priority')).toBeVisible()
-    await expect(page.getByTestId('comment-scope')).toBeVisible()
-    // 不再展示自动填充属性摘要
+    await expect(page.getByTestId('comment-priority')).toHaveCount(0)
+    await expect(page.getByTestId('comment-scope')).toHaveCount(0)
+    // 不展示自动填充属性摘要
     await expect(page.getByTestId('payload-target-type')).toHaveCount(0)
     await expect(page.getByTestId('payload-outer-html')).toHaveCount(0)
   })
@@ -982,13 +984,13 @@ test.describe('T8.6 弹窗精简与抽屉右侧化', () => {
     // 标题栏（pane-head 同款）：评论数 + 已选数
     await expect(page.locator('.drawer-head')).toContainText('评论（2）')
     await expect(page.locator('.drawer-head')).toContainText('已选 0')
-    // 筛选行 + 按钮行（创建者）
+    // 筛选行 + 按钮行（创建者）：单个「批量修改状态」按钮
     await expect(page.getByTestId('filter-host')).toBeVisible()
     await expect(page.getByTestId('filter-status')).toBeVisible()
-    await expect(page.getByTestId('batch-confirm')).toBeVisible()
-    await expect(page.getByTestId('batch-mark-done')).toBeVisible()
-    await expect(page.getByTestId('batch-ignore')).toBeVisible()
-    await expect(page.getByTestId('batch-rework')).toBeVisible()
+    await expect(page.getByTestId('batch-status-btn')).toBeVisible()
+    // 旧四按钮已移除
+    await expect(page.getByTestId('batch-confirm')).toHaveCount(0)
+    await expect(page.getByTestId('batch-rework')).toHaveCount(0)
     // 默认全部展开：两个页面级组的条目均可见
     await expect(page.locator(`[data-cid="${d1.comment_id}"]`)).toBeVisible()
     await expect(page.locator(`[data-cid="${d2.comment_id}"]`)).toBeVisible()

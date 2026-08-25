@@ -164,8 +164,6 @@ export interface CreateCommentResult {
   comment_id: string
   author: string
   status: string
-  priority: string
-  scope: string
   content: string
   created_at: string
   target_type: 'dom' | 'page' | 'doc_block'
@@ -182,8 +180,6 @@ export function createComment(
   body: {
     payload: CommentPayload
     content: string
-    priority: string
-    scope: string
     shot_id?: string
     highlight_rect?: HighlightRect
   },
@@ -193,7 +189,7 @@ export function createComment(
 
 // ───────────────────────── 评论列表/编辑/删除/批量状态（T4.4）──────────────────
 
-export type CommentStatus = '待确认' | '已确认待修改' | '已修改' | '忽略'
+export type CommentStatus = '待确认' | '已确认待修改' | '已修改' | '忽略' | '延后再改'
 
 /** 评论列表条目（GET /comments 响应；payload 为评论 JSON 全量） */
 export interface CommentItem {
@@ -201,8 +197,6 @@ export interface CommentItem {
   author_name: string
   author_email: string
   status: CommentStatus
-  priority: string
-  scope: string
   target_type: 'dom' | 'page' | 'doc_block'
   prototype_page: string
   anchor_id: string
@@ -225,7 +219,7 @@ export function listComments(id: number): Promise<CommentItem[]> {
 
 export function editComment(
   cid: string,
-  body: { content?: string; priority?: string; scope?: string },
+  body: { content?: string },
 ): Promise<{ comment_id: string; updated: string[] }> {
   return api.patch(`/api/comments/${cid}`, body)
 }
@@ -234,11 +228,12 @@ export function deleteComment(cid: string): Promise<{ comment_id: string; delete
   return api.delete(`/api/comments/${cid}`)
 }
 
+/** 批量修改状态（T 增强：任意状态 → 任意目标状态；仅创建者）。 */
 export function batchStatus(
   cids: string[],
-  action: 'confirm' | 'ignore' | 'mark_done' | 'rework',
-): Promise<{ action: string; to: string; updated: string[]; skipped: { comment_id: string; reason: string }[] }> {
-  return api.post('/api/comments/batch-status', { cids, action })
+  status: CommentStatus,
+): Promise<{ status: CommentStatus; updated: string[]; skipped: { comment_id: string; reason: string }[] }> {
+  return api.post('/api/comments/batch-status', { cids, status })
 }
 
 /** 截图上传（T1.2 链路）：Blob → /shots 临时区，返回访问 URL（预览用）。
