@@ -3,7 +3,8 @@
 > 三份契约的完整定义见《产品方案-V1.md》第 3 节（仓库外文档）；本文件是开发上下文索引，契约精简版见 §4。
 > 项目结构：本仓库是平台自身代码（monorepo）；用户产品项目目录（prototype/prd/reviews 三目录约定）由平台在 /data/projects 下按 project_id 创建（08-24 去 Git 本地化架构，原型 zip 与 PRD md 由用户上传），不在本仓库内。
 > **当前进度：阶段 8 去 Git 本地化改造（T8.1–T8.6）已完成并合 main**；task 卡与设计见《架构调整方案-去Git本地化-V1.md》第 11 节；git 集成代码（gitops.py / git_tasks.py / crypto_util.py）已随 T8.1 移除，评论改直接写项目目录。
-> **T2.1 用户管理增强（已完成）**：`ADMIN_EMAIL` 环境变量启动种子超管（name=admin，is_admin=True）；超管登录后顶栏出「用户管理」入口；`User.disabled` 停用账号（不发验证码、已登录任意 /api/ 调用即 401 强制登出）；用户 CRUD 仅超管可用，禁止停用超管本人。
+> **T2.1 用户管理增强（已完成）**：`ADMIN_EMAIL` 环境变量启动种子超管（name=admin，is_admin=True）；超管登录后顶栏出「用户管理」入口；`User.disabled` 停用账号（不发验证码、已登录任意 /api/ 调用即 401 强制登出）；用户 CRUD 仅超管可用，禁止停用超管本人；**超管可删除任意项目**。
+> **T 增强（已完成）**：评论移除 priority/scope、状态五态（新增「延后再改」）、批量改状态任意→任意；原型 iframe 放开 allow-same-origin；bridge nonce 跨页持久 + `<head>` 自愈护栏 + Viewer READY 看门狗；`PROTO_ORIGIN` 可配置；启动自初始化（建目录/建表/种子）；`.env` 自动加载。
 
 ## 1 目录结构
 
@@ -40,7 +41,7 @@ platform/
 1. **注入不改文件**：bridge.js 只在 HTTP 响应中注入原型 HTML，严禁修改 /data/projects 下项目文件（上传产物保持纯净）
 2. **锚点保护**：既有的 `<!-- pa: xxx -->` 与 `data-pa` 锚点不许删除、不许改名（内容生产与平台共用铁律）
 3. **评论状态流转权限**：状态流转（批量改状态）仅项目创建者可操作；**任意状态 → 任意目标状态**，无硬性状态机限制（五态：待确认/已确认待修改/已修改/忽略/延后再改）；「已确认待修改」是交付修改的标准范围
-4. **沙箱**：原型 iframe 独立 origin（:8081）+ sandbox 属性；平台侧 message 监听必须校验 event.origin
+4. **沙箱**：原型 iframe 带 sandbox 属性并含 **allow-same-origin**（业务决策：内部系统不收紧，原型可用 localStorage；生产同域反代 /proto 时与宿主同源）；平台侧 message 监听必须校验 event.origin + nonce
 5. **事实源**：评论以项目目录 reviews/ 为事实源，平台 DB 是展示缓存；评论导出包按 reviews/ 同构组织
 6. **权限**：创建者专属操作（上传原型/PRD、导出评论、可评论开关、删除项目、编辑/删除任意评论、批量改状态）后端逐接口校验，越权一律 403；删除项目创建者或超管均可（T 增强）；「可评论」开关关闭 = 冻结一切写评论操作（浏览不受影响）
 7. **上传安全**：原型 zip 解压必须过安全校验（路径穿越/解压总量/条目数/软链），校验通过才原子替换 prototype/，失败保留旧版本
@@ -53,6 +54,7 @@ platform/
 - 原型侧：`<main data-pa="page-login">`（页面级挂根容器，组件级挂组件）
 - PRD 侧：`## 3.2 登录页 <!-- pa: page-login -->`（同行式 HTML 注释，锚点归属下一个块级元素）
 - 值全局唯一、kebab-case、语义化 `页面-区块-组件`；`pa` 值 = `data-pa` 值即配对
+- T 增强：独立注释行（单独一行 `<!-- pa: x -->`）**归并到前一段落/标题**（前块为列表/表格则给下一块）；**同行多个锚点 → `data-pa="a b"` 存多值**，点击「定位」弹 ID 列表选择
 
 ### 4.2 评论 JSON（reviews/comments/{comment_id}.json）
 
@@ -74,9 +76,13 @@ status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再�
 
 ## 5 代码规范
 
-- **后端**：Flask 蓝图分层（auth/projects/proto_proxy/reviews/reconcile/storage；git 集成已随 T8.1 移除）；SQLite WAL；peewee；接口返回统一 `{code, data, msg}` 结构
+- **后端**：Flask 蓝图分层（auth/users/projects/proto_proxy/reviews/reconcile/storage；git 集成已随 T8.1 移除）；SQLite WAL；peewee；接口返回统一 `{code, data, msg}` 结构
 - **前端**：Vue 3 + `<script setup>` + TypeScript；组件目录按功能划分（CommentBox/CommentDrawer 等）；不引入除 Element Plus 外的 UI 库
-- **bridge.js**：原生 JS、零第三方依赖（modern-screenshot 除外）、全部行为幂等，禁止干扰原型自身逻辑
+- **bridge.js**：原生 JS、零第三方依赖（modern-screenshot 除外）、全部行为幂等（`__PP_BRIDGE__`），禁止干扰原型自身逻辑
+  - nonce 读取：URL hash → `window.__PP_NONCE__` → `sessionStorage.pp_nonce`（内部跳转丢 hash，跨页靠 sessionStorage 恢复）
+  - 注入两段：`<head>` 后自愈护栏（记住 nonce + 轮询补挂 bridge，应对原型脚本崩溃/跳走）+ `</body>` 前 bridge.js
+  - 消息：发送 `'*'`；宿主/接收侧以 event.origin + nonce 校验（不要用 document.referrer 推 origin）
+- **Viewer**：READY 看门狗（8s 未就绪自动重载 iframe ≤3 次，仍失败给「点击重试」）；`PROTO_ORIGIN` 来自 `web/src/proto-origin.ts`（`VITE_PROTO_ORIGIN` > 开发 :8081 > 生产同源）
 - **测试**：契约测试 fixture 放 tests/fixtures/；E2E 断言以任务卡预定义为准，不自由发挥
 
 ## 6 分支纪律
