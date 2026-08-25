@@ -540,12 +540,13 @@ watch(
 </template>
 
 <style scoped>
+/* T8.6：抽屉从底部横条改为右侧栏（_pane.comments 内 flex:1 填满高度） */
 .drawer {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  height: 240px;
-  border-top: 1px solid #d8dde4;
+  border-left: 1px solid #d8dde4;
   background: #fff;
 }
 .bar {
