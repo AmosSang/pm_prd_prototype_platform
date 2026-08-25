@@ -18,6 +18,8 @@
 - [测试](#测试)
 - [注意事项](#注意事项)
 - [服务器部署](#服务器部署)
+- [配套 AI 技能（skills/）](#配套-ai-技能skills)
+- [许可证](#许可证)
 
 ---
 
@@ -137,11 +139,28 @@ platform/
 ├── tests/                  # pytest + Playwright E2E + run-smoke.sh
 ├── scripts/                # 存量数据迁移脚本
 ├── docs/                   # 阶段报告
+├── skills/                 # 平台配套的 AI 协作技能（见「配套 AI 技能」）
 ├── Makefile                # dev / check / smoke / clean
 ├── docker-compose.yml      # server 容器编排
 ├── .env.example            # 环境变量模板
 └── AGENTS.md               # AI 协作说明书（含硬规则）
 ```
+
+---
+
+## 配套 AI 技能（skills/）
+
+本仓库在 `skills/` 下随附若干**平台配套的 AI 协作技能**（每个子目录一个技能，含 `SKILL.md` 与可选脚本）。这些技能供打锚点、评论修改计划梳理等协作场景使用，可由支持技能的 AI 助手（如 WorkBuddy / Trae 等）直接加载执行。
+
+- **`skills/prd-html-anchor/`** —— PRD ↔ HTML 原型**双向锚点关联**技能。
+  - 支持两种场景：**① 从零创建锚点**（通读 PRD → 起 ID → 双侧打标）；**② 改版后复查与完善**（先跑检查脚本拿现状 → 逐类处置孤儿 / 重复 / 单独成行 / 命名违规 → 补新增内容锚点 → 复跑验证）。
+  - 配套脚本 `check_orphan_anchors.py`（零依赖）：检查两侧孤儿锚点、重复 ID、PRD 锚点单独成行、命名违规，并给出修复建议；同时识别静态 `data-pa` 与 JS `setAttribute` 动态注入；退出码 0/1/2 可作 CI 门禁。
+  - 用法（与平台项目目录同构）：`python skills/prd-html-anchor/check_orphan_anchors.py <项目目录>`（下含 `prd/` 与 `prototype/`）。
+- **`skills/comment-revision-plan/`** —— 评论导出包**解压与修改计划梳理**技能。
+  - 消费平台评论导出 zip（`manifest.json` + `comments/` + `shots/`），配套脚本 `unpack_comments.py`（零依赖、安全解压）：解压导出包、逐条读取评论、筛出「已确认待修改」并按宿主（PRD 文档 / 原型）分组输出定位提示；退出码 0/1/2。
+  - 主流程：逐条梳理修改方案（PRD 评论 → 定位段落并判断原型联动；原型评论 → 定位元素并判断 PRD 联动；无 PRD 关联的原型评论需补 PRD 描述），不确定处会向产品经理提问确认，最终交付 **PRD 修改计划**与**原型修改计划**两份 markdown。**只产出计划，不执行修改**，正式修改由产品经理确认后另行发起。
+
+这两个技能是项目「二期 Agent 闭环」中「导出包作为 Agent 输入契约」形态的先行落地，详见 `架构调整方案-去Git本地化-V1.md` 与 `AGENTS.md` §1.1。
 
 ---
 
@@ -346,3 +365,15 @@ server {
 - [ ] 生产用 `gunicorn`，不要用 dev server
 
 **排查：查看器原型区一直「加载中…」**：该指示由 bridge 在原型 `window.load` 后上报 `READY` 驱动。若长时间停在加载且刷新不恢复，先看浏览器 Network 是否有 `/bridge.js` 请求非 200（常见：Nginx 未反代 `/bridge.js`、`/vendor/`），或 Console 有报错。Viewer 已内置 READY 看门狗：8s 未就绪自动重载 iframe（上限 3 次），仍失败则显示红色「连接异常，点击重试」。
+
+---
+
+## 许可证
+
+本项目以 **非商业署名许可（Non-Commercial Attribution License）** 发布。
+
+- **非商业用途**：您可以免费使用、修改、分发本项目的源代码、文档与配套 AI 技能（`skills/`），用于**非商业目的**（学习、研究、演示、个人 / 非营利项目等）。
+- **署名义务**：无论您是**使用**还是**修改**本项目，均须保留原始版权声明与许可协议，并清晰标注来源（原作者 AmosSang / 桑桑，仓库地址 https://github.com/AmosSang/pm_prd_prototype_platform ）。若进行了修改，还须显著标示修改内容。
+- **商业用途**：任何商业用途均须事先获得版权人**书面授权**。
+
+完整条款见仓库根目录 [LICENSE](./LICENSE)。

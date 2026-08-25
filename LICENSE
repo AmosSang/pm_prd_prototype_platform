@@ -1,0 +1,83 @@
+# 产品方案展示平台 · 开源许可协议（非商业署名许可）
+# Product Plan Platform — Non-Commercial Attribution License
+
+**版权所有 © 2026 AmosSang（桑桑）。保留所有权利。**
+Copyright © 2026 AmosSang (桑桑). All rights reserved.
+
+本许可协议（以下简称「协议」）适用于「产品方案展示平台」（Product Plan Platform，仓库地址 https://github.com/AmosSang/pm_prd_prototype_platform ，以下简称「本软件」）的全部内容，包括但不限于源代码、文档、配套 AI 技能（`skills/`）及相关素材。
+
+---
+
+## 一、授权范围
+
+在遵守本协议各项条款的前提下，版权人授予您一项**非独占、不可转让、可撤销**的权利：
+
+1. **非商业用途免费使用**：您可以在**非商业目的**下，免费使用本软件及其全部内容，包括但不限于下载、安装、部署、运行、学习、研究、演示、教学，以及将其用于个人或非营利项目。
+2. **非商业用途免费修改**：您可以在非商业目的下，对本软件进行修改、改编、二次开发，并运行、分发您修改后的版本。
+
+「非商业目的」指不以营利为目的、不直接或间接产生商业收益的使用行为，例如：个人学习、开源技术研究、教学演示、公益或非营利组织内部使用等。
+
+---
+
+## 二、使用与修改的前提条件（署名义务）
+
+无论您是**使用**还是**修改**本软件，均须满足以下署名（Attribution）要求：
+
+1. **保留版权与许可声明**：在您分发、展示、或基于本软件形成的任何作品中，必须完整保留本 `LICENSE` 文件，以及源代码、文档中原有的版权声明与作者信息，**不得删除或篡改**。
+2. **明确标注来源**：您须在分发物、产品说明或公开页面中清晰标注本软件来源，至少包含以下信息：
+   - 软件名称：产品方案展示平台（Product Plan Platform）
+   - 原作者：AmosSang（桑桑）
+   - 仓库地址：https://github.com/AmosSang/pm_prd_prototype_platform
+   - 示例标注：「本作品基于『产品方案展示平台』（Product Plan Platform，https://github.com/AmosSang/pm_prd_prototype_platform ）修改 / 使用，原作者 AmosSang（桑桑）。」
+3. **显著标示修改**：若您对本软件进行了修改并对外分发，须在醒目位置说明哪些部分被修改、以及修改内容，避免他人将修改版误认为原版。
+
+---
+
+## 三、商业使用
+
+**任何商业用途均须事先获得版权人书面授权。** 商业用途包括但不限于：
+
+- 将本软件用于商业产品或商业服务；
+- 以营利为目的的部署、运营、分发；
+- 企业内部以营利为目的的使用（如作为收费业务的生产系统）；
+- 任何直接或间接产生商业收益的使用行为。
+
+如需商业授权，请通过仓库主页或版权人公开渠道联系，协商授权范围与条款。
+
+---
+
+## 四、免责声明
+
+本软件按「**现状（AS IS）**」提供，不提供任何明示或默示担保，包括但不限于对适销性、特定用途适用性、非侵权性、安全性、可靠性的担保。
+
+在任何情况下，版权人及本软件的贡献者均不对因使用或无法使用本软件所导致的任何直接、间接、偶然、特殊、惩罚性或后果性损害承担责任，无论该等损害是否可预见，也无论责任理论为何（合同、侵权或其他）。
+
+您使用本软件即表示已理解并自愿承担由此带来的一切风险。
+
+---
+
+## 五、协议终止
+
+若您违反本协议的任何条款，本授权将**自动立即终止**，且无须版权人另行通知。协议终止后，您须立即停止使用本软件，并销毁所持有的全部副本（含修改版）。
+
+若您已遵守本协议，本授权在您停止使用本软件或本协议被替换前持续有效。
+
+---
+
+## 六、其他
+
+- 本协议构成您与版权人之间关于本软件的完整约定。
+- 如本协议任一条款被认定为无效或不可执行，不影响其余条款的效力。
+- 版权人保留对本协议的最终解释权，并有权在不改变「非商业免费 + 署名」核心原则的前提下更新本协议。
+
+---
+
+### English Summary (non-binding / 仅供参考)
+
+This project is licensed under a **Non-Commercial Attribution License**.
+
+- You may **freely use and modify** this software for **non-commercial purposes** (learning, research, demonstration, personal or non-profit use).
+- If you use or modify it, you **must give appropriate credit** to the original author: **AmosSang (桑桑)**, and retain this license and the original copyright notices. If you distribute a modified version, you must clearly indicate what was changed.
+- **Commercial use requires prior written permission** from the copyright holder.
+
+The software is provided "AS IS", without warranty of any kind. Full terms are set out above in the Chinese text, which governs in case of any discrepancy.
