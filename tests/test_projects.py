@@ -259,6 +259,20 @@ class TestUpdateProject:
         assert client.patch(f"/api/projects/{pid}", json={"commentable": 1}).status_code == 400
         assert client.patch("/api/projects/99999", json={"commentable": True}).status_code == 404
 
+    def test_commentable_creator_only(self, app):
+        """T8.4 收权（§6）：「可评论」开关仅创建者可操作，其他登录用户 403。"""
+        client, _ = app
+        pid = self._make_project(client, "开关项目3")
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        resp = client.patch(f"/api/projects/{pid}", json={"commentable": False})
+        assert resp.status_code == 403
+        assert "仅项目创建者" in resp.get_json()["msg"]
+        # 记录未变
+        assert Project.get(Project.id == pid).commentable is True
+
 
 # ───────────────────── 内容上传（T8.1 最小版）─────────────────────
 

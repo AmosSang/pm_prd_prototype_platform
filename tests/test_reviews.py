@@ -494,6 +494,60 @@ class TestBatchStatus:
             "cids": [], "action": "confirm",
         }).status_code == 400
 
+    def test_batch_creator_only(self, app, project):
+        """T8.4 收权（§6）：状态流转仅创建者可操作——非创建者调用，
+        每条都跳过并报「仅项目创建者可操作状态」。"""
+        client, p = project
+        c1 = _submit_simple(client, p)
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        data = resp.get_json()["data"]
+        assert data["updated"] == []
+        assert data["skipped"][0]["reason"] == "仅项目创建者可操作状态"
+        # 状态未变
+        assert Comment.get(Comment.comment_id == c1).status == "待确认"
+
+    def test_mark_done_and_rework_closure(self, app, project):
+        """T8.4 状态闭环：mark_done（已确认待修改→已修改）+ rework（已修改→已确认待修改）。"""
+        client, p = project
+        _, projects_dir, _ = app
+        c1 = _submit_simple(client, p)
+        # 确认 → 已确认待修改
+        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
+        assert Comment.get(Comment.comment_id == c1).status == "已确认待修改"
+
+        # mark_done → 已修改
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "mark_done"})
+        assert resp.get_json()["data"]["updated"] == [c1]
+        assert Comment.get(Comment.comment_id == c1).status == "已修改"
+        # 项目目录评论 JSON 同步（直写事实源）
+        fj = _read_cj(projects_dir, p, c1)
+        assert fj["status"] == "已修改"
+
+        # rework（返工）→ 已确认待修改
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1], "action": "rework"})
+        assert resp.get_json()["data"]["updated"] == [c1]
+        assert Comment.get(Comment.comment_id == c1).status == "已确认待修改"
+
+    def test_mark_done_state_machine(self, app, project):
+        """状态机：mark_done 仅接受「已确认待修改」源状态（待确认/忽略态跳过）。"""
+        client, p = project
+        c1 = _submit_simple(client, p)  # 待确认
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "confirm"})
+        c3 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        client.post("/api/comments/batch-status", json={"cids": [c3], "action": "ignore"})
+
+        resp = client.post("/api/comments/batch-status", json={"cids": [c1, c2, c3], "action": "mark_done"})
+        data = resp.get_json()["data"]
+        assert data["updated"] == [c2]  # 仅已确认待修改可流转
+        assert len(data["skipped"]) == 2
+        assert Comment.get(Comment.comment_id == c1).status == "待确认"
+        assert Comment.get(Comment.comment_id == c2).status == "已修改"
+
 
 class TestEditComment:
     def test_edit_by_author(self, app, project):
@@ -516,34 +570,46 @@ class TestEditComment:
         assert fj["priority"] == "P1"
 
     def test_edit_rules(self, app, project):
-        """编辑规则：非作者拒；已确认待修改可编辑；忽略态拒；空内容拒。"""
+        """编辑规则（T8.4 §6）：创建者可编辑任意状态；非创建者作者限自己的
+        评论且仅待确认/已确认待修改态；非作者 403；空内容/无字段 400。"""
         client, p = project
+        # 创建者作者 c1：忽略态仍可编辑（创建者跨状态管理者语义）
         c1 = _submit_simple(client, p)
-
-        # 已确认待修改 → 可编辑
-        client.post("/api/comments/batch-status", json={"cids": [c1], "action": "confirm"})
-        assert client.patch(f"/api/comments/{c1}", json={"content": "确认后编辑"}).status_code == 200
-
-        # 忽略 → 不可编辑
         client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
-        resp = client.patch(f"/api/comments/{c1}", json={"content": "x"})
-        assert resp.status_code == 400
-        assert "不可编辑" in resp.get_json()["msg"]
+        assert client.patch(f"/api/comments/{c1}", json={"content": "创建者改忽略态"}).status_code == 200
 
-        # 非作者（换 session 用户）
-        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        # 非创建者作者（uid=2）发评论 c2：待确认态可编辑；忽略态不可编辑
         with client.session_transaction() as sess:
             sess["uid"] = 2
             sess["email"] = "other@corp.com"
             sess["name"] = "其他人"
-        resp = client.patch(f"/api/comments/{c2}", json={"content": "别人改"})
-        assert resp.status_code == 403
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        assert client.patch(f"/api/comments/{c2}", json={"content": "作者改自己"}).status_code == 200
         with client.session_transaction() as sess:
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
+        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "ignore"})
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        resp = client.patch(f"/api/comments/{c2}", json={"content": "x"})
+        assert resp.status_code == 400
+        assert "不可编辑" in resp.get_json()["msg"]
 
-        # 空内容 / 无字段
+        # 非作者（uid=3，非创建者非作者）→ 403
+        with client.session_transaction() as sess:
+            sess["uid"] = 3
+            sess["email"] = "third@corp.com"
+            sess["name"] = "第三人"
+        assert client.patch(f"/api/comments/{c2}", json={"content": "第三人改"}).status_code == 403
+
+        # 恢复创建者 → 空内容 / 无字段 400
+        with client.session_transaction() as sess:
+            sess["uid"] = 1
+            sess["email"] = "pm@corp.com"
+            sess["name"] = "产品桑"
         assert client.patch(f"/api/comments/{c2}", json={"content": " "}).status_code == 400
         assert client.patch(f"/api/comments/{c2}", json={}).status_code == 400
 
@@ -567,23 +633,43 @@ class TestDeleteComment:
         assert not (Path(projects_dir) / p.project_id / "reviews" / "shots" / f"{c1}.png").exists()
 
     def test_delete_rules(self, app, project):
-        """删除规则：忽略态拒；非作者拒；重复删 404。"""
+        """删除规则（T8.4 §6）：创建者可删任意状态；非创建者作者限自己的
+        评论且仅待确认/已确认待修改态；非作者 403；重复删 404。"""
         client, p = project
+        # 创建者作者 c1：忽略态仍可删（跨状态管理者语义）
         c1 = _submit_simple(client, p)
         client.post("/api/comments/batch-status", json={"cids": [c1], "action": "ignore"})
-        assert client.delete(f"/api/comments/{c1}").status_code == 400
+        assert client.delete(f"/api/comments/{c1}").status_code == 200
 
-        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        # 非创建者作者（uid=2）发评论 c2：忽略态不可删；创建者可删 + 重复删 404
         with client.session_transaction() as sess:
             sess["uid"] = 2
             sess["email"] = "other@corp.com"
             sess["name"] = "其他人"
-        assert client.delete(f"/api/comments/{c2}").status_code == 403
+        c2 = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
         with client.session_transaction() as sess:
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
+        client.post("/api/comments/batch-status", json={"cids": [c2], "action": "ignore"})
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        assert client.delete(f"/api/comments/{c2}").status_code == 400  # 忽略态作者不可删
 
+        # 非作者（uid=3，非创建者非作者）→ 403
+        with client.session_transaction() as sess:
+            sess["uid"] = 3
+            sess["email"] = "third@corp.com"
+            sess["name"] = "第三人"
+        assert client.delete(f"/api/comments/{c2}").status_code == 403
+
+        # 创建者删非作者评论（跨状态）→ 200；重复删 404
+        with client.session_transaction() as sess:
+            sess["uid"] = 1
+            sess["email"] = "pm@corp.com"
+            sess["name"] = "产品桑"
         assert client.delete(f"/api/comments/{c2}").status_code == 200
         assert client.delete(f"/api/comments/{c2}").status_code == 404
 

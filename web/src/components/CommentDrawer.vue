@@ -30,6 +30,8 @@ const props = defineProps<{
   currentUserEmail: string
   focusKey?: string
   commentable?: boolean
+  // T8.4：创建者（批量流转/跨状态编辑删除/标记已修改专属）
+  isCreator?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -140,14 +142,28 @@ const checkedList = computed(() =>
 )
 
 /** 可被当前动作处理的勾选项（状态机合法 + 项目可评论才可提交，
- * 其余后端也会跳过） */
-function actionable(action: 'confirm' | 'ignore'): CommentItem[] {
+ * 其余后端也会跳过）。action 支持 confirm/ignore/mark_done/rework（T8.4）。 */
+function actionable(action: 'confirm' | 'ignore' | 'mark_done' | 'rework'): CommentItem[] {
   if (props.commentable === false) return []
-  const from = action === 'confirm' ? ['待确认'] : ['待确认', '已确认待修改']
+  const from =
+    action === 'confirm'
+      ? ['待确认']
+      : action === 'mark_done'
+        ? ['已确认待修改']
+        : action === 'rework'
+          ? ['已修改']
+          : ['待确认', '已确认待修改']
   return checkedList.value.filter((c) => from.includes(c.status))
 }
 
-async function onBatch(action: 'confirm' | 'ignore') {
+const BATCH_LABEL: Record<string, string> = {
+  confirm: '确认',
+  ignore: '忽略',
+  mark_done: '标记已修改',
+  rework: '返工',
+}
+
+async function onBatch(action: 'confirm' | 'ignore' | 'mark_done' | 'rework') {
   const items = actionable(action)
   if (!items.length || busy.value) return
   busy.value = true
@@ -157,7 +173,7 @@ async function onBatch(action: 'confirm' | 'ignore') {
       action,
     )
     if (res.updated.length) {
-      ElMessage.success(`已${action === 'confirm' ? '确认' : '忽略'} ${res.updated.length} 条`)
+      ElMessage.success(`已${BATCH_LABEL[action]} ${res.updated.length} 条`)
     }
     if (res.skipped.length) {
       ElMessage.warning(`${res.skipped.length} 条不可操作（状态不符）`)
@@ -222,9 +238,12 @@ async function onDelete(c: CommentItem) {
   }
 }
 
+/** T8.4 §6：创建者可编辑/删除任意状态；作者限自己的评论且仅
+ * 待确认/已确认待修改态；「可评论」关闭时一律不允许（写操作冻结）。 */
 function canEdit(c: CommentItem): boolean {
+  if (props.commentable === false) return false
+  if (props.isCreator) return true
   return (
-    props.commentable !== false &&
     c.author_email === props.currentUserEmail &&
     EDITABLE.includes(c.status)
   )
@@ -286,7 +305,7 @@ watch(
           <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
         </select>
       </label>
-      <span class="batch">
+      <span v-if="isCreator" class="batch">
         已选 {{ checkedList.length }}
         <button
           class="op confirm"
@@ -298,6 +317,15 @@ watch(
           批量确认
         </button>
         <button
+          class="op mark"
+          :disabled="!actionable('mark_done').length || busy"
+          data-testid="batch-mark-done"
+          title="已确认待修改 → 已修改（状态闭环，创建者）"
+          @click="onBatch('mark_done')"
+        >
+          标记已修改
+        </button>
+        <button
           class="op ignore"
           :disabled="!actionable('ignore').length || busy"
           data-testid="batch-ignore"
@@ -305,6 +333,15 @@ watch(
           @click="onBatch('ignore')"
         >
           批量忽略
+        </button>
+        <button
+          class="op rework"
+          :disabled="!actionable('rework').length || busy"
+          data-testid="batch-rework"
+          title="已修改 → 已确认待修改（返工再改，创建者）"
+          @click="onBatch('rework')"
+        >
+          返工
         </button>
       </span>
     </div>
@@ -456,6 +493,8 @@ watch(
 .op.confirm { background: #2b5cff; border-color: #2b5cff; color: #fff; }
 .op.confirm:hover:not(:disabled) { background: #1e4fd8; color: #fff; }
 .op.ignore:hover:not(:disabled) { border-color: #b45200; color: #b45200; }
+.op.mark:hover:not(:disabled) { border-color: #2e9e44; color: #2e9e44; }
+.op.rework:hover:not(:disabled) { border-color: #b8860b; color: #b8860b; }
 .op.danger:hover { border-color: #d33; color: #d33; }
 
 .list { flex: 1; overflow-y: auto; padding: 8px 14px; user-select: none; }
