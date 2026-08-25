@@ -327,6 +327,13 @@ server {
 - 项目内容：`data/projects/{project_id}/`（prototype / prd / reviews）
 - 截图临时区：`data/shots/`
 
+**数据库初始化（无需手动建库）**：后端启动时会自动完成，无需任何手工 SQL/建库步骤：
+- 幂等创建 `data/`、`data/projects/`、`data/shots/` 目录；
+- 幂等 `create_tables` 建表 + 轻量迁移（`users.disabled` 列）；
+- 按 `ADMIN_EMAIL` 幂等种子超级管理员（`name=admin`、`is_admin=True`）。
+
+只要让运行后端服务的系统用户对 `data/`（或 `DATA_DIR` 指向的目录）**有写权限**即可。若首次启动失败，多半是目录不可写或 `ADMIN_EMAIL` 未设置（后者不会种子超管，普通用户会提示“该邮箱未开通访问权限”）。
+
 建议定期备份整个 `data/` 目录，并在升级前备份（仓库提供 `scripts/migrate-t8.1.sh` 示例）。
 
 ### 上线前 Checklist

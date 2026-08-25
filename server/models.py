@@ -8,10 +8,11 @@
   content_updated_at；git_tasks 表删除（落仓队列随 git 链路移除）
 """
 import datetime as dt
+import os
 
 import peewee
 
-from server.config import ADMIN_EMAIL, DB_PATH
+from server.config import ADMIN_EMAIL, DATA_DIR, DB_PATH, PROJECTS_DIR
 
 
 def utcnow_str() -> str:
@@ -107,7 +108,15 @@ class Comment(BaseModel):
 
 
 def init_tables() -> None:
-    """建表（幂等）。应用启动与测试 fixture 共用。"""
+    """建表（幂等）。应用启动与测试 fixture 共用。
+
+    服务器全新部署时 `data/` 目录不存在会导致连库失败——这里先建目录骨架
+    （data、data/projects、data/shots 三处），使「启动即自初始化」，
+    无需手动 mkdir。
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR, "shots"), exist_ok=True)
     db.connect(reuse_if_open=True)
     db.create_tables([User, VerificationCode, Project, Comment], safe=True)
     _migrate()
