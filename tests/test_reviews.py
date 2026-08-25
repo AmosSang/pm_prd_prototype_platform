@@ -8,8 +8,11 @@ T8.1：落仓 = 直写项目目录（无队列），提交返回即断言文件�
 截图从临时区复制进项目 reviews/shots/。
 """
 import datetime as dt
+import io
 import json
+import re
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -625,3 +628,119 @@ class TestCommentableGuard:
         p.commentable = True
         p.save()
         assert client.patch(f"/api/comments/{c1}", json={"content": "恢复了"}).status_code == 200
+
+
+# ═══════════════════════ T8.3 评论导出 ═══════════════════════
+
+def _open_export_zip(resp) -> tuple[zipfile.ZipFile, dict, str]:
+    """解导出响应为 (ZipFile, manifest, 顶层目录名)。"""
+    assert resp.status_code == 200, resp.get_json() if resp.mimetype != "application/zip" else resp.data[:100]
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    names = zf.namelist()
+    prefixes = {n.split("/")[0] for n in names}
+    assert len(prefixes) == 1
+    prefix = prefixes.pop()
+    manifest = json.loads(zf.read(f"{prefix}/manifest.json"))
+    return zf, manifest, prefix
+
+
+class TestExportComments:
+    def _seed(self, app, project) -> tuple:
+        """铺 3 条评论（1 带截图 dom + 1 文档 + 1 待确认）+ 1 条软删，
+        其中 dom 那条流转为「已确认待修改」。返回 (dom_cid, doc_cid, pend_cid, deleted_cid)。"""
+        client, p = project
+        _, projects_dir, shots_dir = app
+        # 临时截图（dom 评论引用）
+        tmp_shot = Path(shots_dir) / p.project_id / "shot-exp.png"
+        tmp_shot.parent.mkdir(parents=True, exist_ok=True)
+        tmp_shot.write_bytes(b"\x89PNG\r\n\x1a\nexport-shot")
+
+        # 注意：shot_id/highlight_rect 是 body 顶层字段（非 payload 字段），
+        # 须经 _submit 直传——_submit_simple 会把 kwargs 全喂给 payload
+        c_dom = _submit(client, p, _dom_payload(), shot_id="shot-exp",
+                        highlight_rect={"x": 1, "y": 2, "w": 3, "h": 4}).get_json()["data"]["comment_id"]
+        c_doc = _submit_simple(client, p, target_type="doc_block", prototype_page="",
+                               anchor_id="", nearest_anchor_id="", css_path="",
+                               outer_html="", text_excerpt="导出文档评论段落",
+                               doc_anchor_id="", doc_excerpt="导出文档评论段落",
+                               doc_path="5.1 登录页", scope="doc")
+        c_pend = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        c_del = _submit_simple(client, p, anchor_id="", nearest_anchor_id="")
+        client.post("/api/comments/batch-status", json={"cids": [c_dom], "action": "confirm"})
+        client.delete(f"/api/comments/{c_del}")  # 软删（导出须排除）
+        return c_dom, c_doc, c_pend, c_del
+
+    def test_export_all(self, app, project):
+        """scope=all：未删除评论全量；包结构与项目目录同构；manifest 字段齐全。"""
+        client, p = project
+        c_dom, c_doc, c_pend, c_del = self._seed(app, project)
+
+        resp = client.get(f"/api/projects/{p.id}/comments/export?scope=all")
+        zf, manifest, prefix = _open_export_zip(resp)
+
+        # 包结构：顶层目录名 {project_id}-comments-{yyyymmdd}-{HHmm}
+        assert re.fullmatch(rf"{re.escape(p.project_id)}-comments-\d{{8}}-\d{{4}}", prefix)
+        # 附件下载头
+        assert resp.headers["Content-Disposition"].startswith("attachment;")
+        assert resp.headers["Content-Disposition"].endswith(".zip")
+        # manifest 字段（技术方案 §2.8）
+        assert manifest["scope"] == "all"
+        assert manifest["total"] == 3  # 软删不在
+        assert manifest["project"] == {"id": p.project_id, "name": p.name}
+        assert manifest["exported_at"]
+        by_cid = {m["comment_id"]: m for m in manifest["comments"]}
+        assert set(by_cid) == {c_dom, c_doc, c_pend}
+        assert by_cid[c_dom]["status"] == "已确认待修改"
+        assert by_cid[c_dom]["has_shot"] is True
+        assert by_cid[c_doc]["has_shot"] is False  # 文档评论无截图
+        # comments/：全部 3 条 + 截图 1 张（仅被导出评论引用的）
+        assert {n.split("/", 1)[1] for n in zf.namelist() if "/comments/" in n} == {
+            f"comments/{c}.json" for c in (c_dom, c_doc, c_pend)
+        }
+        assert {n.split("/", 1)[1] for n in zf.namelist() if "/shots/" in n} == {f"shots/{c_dom}.png"}
+        assert zf.read(f"{prefix}/shots/{c_dom}.png") == b"\x89PNG\r\n\x1a\nexport-shot"
+        # 评论 JSON 与项目目录文件一致（事实源）
+        _, projects_dir, _ = app
+        disk = _read_cj(projects_dir, p, c_dom)
+        assert json.loads(zf.read(f"{prefix}/comments/{c_dom}.json")) == disk
+
+    def test_export_confirmed_only(self, app, project):
+        """scope=confirmed：仅「已确认待修改」（交付修改的标准范围）。"""
+        client, p = project
+        c_dom, _, _, _ = self._seed(app, project)
+
+        resp = client.get(f"/api/projects/{p.id}/comments/export?scope=confirmed")
+        zf, manifest, prefix = _open_export_zip(resp)
+
+        assert manifest["scope"] == "confirmed"
+        assert manifest["total"] == 1
+        assert [m["comment_id"] for m in manifest["comments"]] == [c_dom]
+        assert f"{prefix}/comments/{c_dom}.json" in zf.namelist()
+        assert len([n for n in zf.namelist() if "/comments/" in n]) == 1
+
+    def test_export_empty(self, app, project):
+        """无评论：空包（manifest total=0），不是 404/错误。"""
+        client, p = project
+        resp = client.get(f"/api/projects/{p.id}/comments/export?scope=all")
+        zf, manifest, prefix = _open_export_zip(resp)
+        assert manifest["total"] == 0
+        assert manifest["comments"] == []
+        assert zf.namelist() == [f"{prefix}/manifest.json"]
+
+    def test_export_creator_only(self, app, project):
+        """仅创建者：其他登录用户 403。"""
+        client, p = project
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
+        resp = client.get(f"/api/projects/{p.id}/comments/export?scope=all")
+        assert resp.status_code == 403
+        assert "仅项目创建者" in resp.get_json()["msg"]
+
+    def test_export_bad_scope(self, app, project):
+        """非法 scope：400。"""
+        client, p = project
+        resp = client.get(f"/api/projects/{p.id}/comments/export?scope=everything")
+        assert resp.status_code == 400
+        assert "scope" in resp.get_json()["msg"]
