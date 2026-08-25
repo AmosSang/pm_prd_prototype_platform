@@ -1,7 +1,8 @@
 # 产品方案展示平台 · 平台代码仓库
 
 > 三份契约的完整定义见《产品方案-V1.md》第 3 节（仓库外文档）；本文件是开发上下文索引，契约精简版见 §4。
-> 项目结构：本仓库是平台自身代码（monorepo）；用户产品项目仓库（prototype/prd/reviews 三目录约定）由平台运行时 clone 到 /data/repos，不在本仓库内。
+> 项目结构：本仓库是平台自身代码（monorepo）；用户产品项目目录（prototype/prd/reviews 三目录约定）由平台在 /data/projects 下按 project_id 创建（08-24 去 Git 本地化架构，原型 zip 与 PRD md 由用户上传），不在本仓库内。
+> **当前进行中：阶段 8 去 Git 本地化改造（T8.1–T8.6）**，任务卡与设计见《架构调整方案-去Git本地化-V1.md》第 11 节；git 集成代码（gitops.py / git_tasks.py / crypto_util.py）已随 T8.1 移除，评论改直接写项目目录。
 
 ## 1 目录结构
 
@@ -12,7 +13,7 @@ platform/
 ├── docker-compose.yml 一键起环境（开发与部署同构）
 ├── server/            Flask 后端
 │   ├── app.py         工厂 + 蓝图注册
-│   ├── config.py      环境变量（PLATFORM_SECRET、SMTP、路径）
+│   ├── config.py      环境变量（PLATFORM_SECRET、SMTP、路径、上传上限）
 │   ├── requirements.txt
 │   └── ...
 ├── web/               Vue 3 前端
@@ -21,7 +22,7 @@ platform/
 │   └── src/
 ├── bridge/            bridge.js 源码（原生 JS，注入原型 iframe）
 ├── tests/             契约测试 fixture 与 E2E（Playwright）
-└── docs/              POC 报告、部署文档、skill 指令文档（T6.1 起建）
+└── docs/              POC 报告、部署文档（skill 指令文档随 Agent 方案二期再建）
 ```
 
 ## 2 常用命令
@@ -35,12 +36,13 @@ platform/
 
 ## 3 硬规则（任何改动不得违反）
 
-1. **注入不改文件**：bridge.js 只在 HTTP 响应中注入原型 HTML，严禁修改 /data/repos 下仓库文件
-2. **锚点保护**：既有的 `<!-- pa: xxx -->` 与 `data-pa` 锚点不许删除、不许改名（skill 与平台共用铁律）
-3. **评论状态**：只有「已确认待修改」状态的评论可被修改执行；其余状态一律不动
+1. **注入不改文件**：bridge.js 只在 HTTP 响应中注入原型 HTML，严禁修改 /data/projects 下项目文件（上传产物保持纯净）
+2. **锚点保护**：既有的 `<!-- pa: xxx -->` 与 `data-pa` 锚点不许删除、不许改名（内容生产与平台共用铁律）
+3. **评论状态流转权限**：状态流转（确认/忽略/标记已修改）仅项目创建者可操作；「已确认待修改」是交付修改的标准范围
 4. **沙箱**：原型 iframe 独立 origin（:8081）+ sandbox 属性；平台侧 message 监听必须校验 event.origin
-5. **事实源**：评论以仓库 reviews/ 为事实源，平台 DB 是展示缓存
-6. **凭据**：git token 用 Fernet 加密落库，密钥来自环境变量 PLATFORM_SECRET；token 不进代码、不进日志、不进 .git/config
+5. **事实源**：评论以项目目录 reviews/ 为事实源，平台 DB 是展示缓存；评论导出包按 reviews/ 同构组织
+6. **权限**：创建者专属操作（上传原型/PRD、导出评论、可评论开关、删除项目、编辑/删除任意评论、状态流转）后端逐接口校验，越权一律 403；「可评论」开关关闭 = 冻结一切写评论操作（浏览不受影响）
+7. **上传安全**：原型 zip 解压必须过安全校验（路径穿越/解压总量/条目数/软链），校验通过才原子替换 prototype/，失败保留旧版本
 
 ## 4 三份契约精简版（完整版见《产品方案-V1.md》§3）
 
@@ -54,14 +56,14 @@ platform/
 
 字段组：元信息（comment_id/author/status/priority/scope/content/created_at）、DOM 定位（target_type/prototype_page/anchor_id/nearest_anchor_id/css_path/outer_html/text_excerpt）、视觉上下文（screenshot/highlight_rect）、交互状态（interaction_state）、文档关联（doc_anchor_id/doc_excerpt/doc_block_fingerprint）。
 
-status 四态：待确认 → 已确认待修改 → 已修改；忽略为旁路。scope：prototype/doc/both。
+status 四态：待确认 → 已确认待修改 → 已修改（创建者手动标记）；忽略为旁路。scope：prototype/doc/both。
 
-### 4.3 项目仓库目录约定
+### 4.3 项目目录约定（/data/projects/{project_id}/）
 
 ```
-project-repo/
-├── prototype/   入口 index.html，多页放 pages/
-├── prd/         markdown 文档
+{project_id}/
+├── prototype/   原型 zip 解压产物（≤100MB 包；入口 index.html，多页放 pages/）
+├── prd/         唯一一份 markdown 文档
 └── reviews/
     ├── comments/  每条评论一个 JSON
     └── shots/     整页截图 PNG
@@ -69,13 +71,13 @@ project-repo/
 
 ## 5 代码规范
 
-- **后端**：Flask 蓝图分层（auth/projects/gitops/proto_proxy/reviews/reconcile）；SQLite WAL；peewee 或裸 sqlite3；接口返回统一 `{code, data, msg}` 结构
-- **前端**：Vue 3 + `<script setup>` + TypeScript；组件目录按功能划分（SplitPane/ProtoFrame/PrdRenderer/CommentBox/CommentDrawer）；不引入除 Element Plus 外的 UI 库
-- **bridge.js**：原生 JS、零第三方依赖（html2canvas 除外）、全部行为幂等，禁止干扰原型自身逻辑
+- **后端**：Flask 蓝图分层（auth/projects/proto_proxy/reviews/reconcile/storage；git 集成已随 T8.1 移除）；SQLite WAL；peewee；接口返回统一 `{code, data, msg}` 结构
+- **前端**：Vue 3 + `<script setup>` + TypeScript；组件目录按功能划分（CommentBox/CommentDrawer 等）；不引入除 Element Plus 外的 UI 库
+- **bridge.js**：原生 JS、零第三方依赖（modern-screenshot 除外）、全部行为幂等，禁止干扰原型自身逻辑
 - **测试**：契约测试 fixture 放 tests/fixtures/；E2E 断言以任务卡预定义为准，不自由发挥
 
 ## 6 分支纪律
 
-- 每张任务卡一个分支：t{阶段}.{序号}-{短名}，如 t0.2-check-infra
-- commit message 格式：`[T0.2] 验收设施：make check + Playwright 骨架`
+- 每张任务卡一个分支：t{阶段}.{序号}-{短名}，如 t8.1-model-storage
+- commit message 格式：`[T8.1] 数据模型与目录基建：去 git 字段 + creator + PROJECTS_DIR`
 - main 始终全绿可演示，验收通过才合回

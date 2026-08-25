@@ -8,8 +8,11 @@ server/__pycache__/
 web/node_modules/
 web/dist/
 
-# 运行时数据（SQLite、本地 clone）
+# 运行时数据（SQLite、本地项目目录）
 data/
+
+# T8.1 存量清理脚本产物（本地备份，勿入库）
+data-backup-*.tar.gz
 
 # 环境变量
 .env
