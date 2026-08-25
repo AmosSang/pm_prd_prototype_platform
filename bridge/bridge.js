@@ -32,16 +32,16 @@
   var m = /(?:^|#)pp-nonce=([A-Za-z0-9_-]+)/.exec(window.location.hash)
   var NONCE = m ? m[1] : null
 
-  // 宿主 origin：来自 referrer（浏览器设置，frame 内容无法伪造）
-  var hostOrigin = document.referrer ? new URL(document.referrer).origin : null
-
+  // 认证：nonce 由宿主写进附件 URL hash，是双向消息的真正口令。
+  // 发送目标 origin 用 '*'（宿主 onMessage 已按 event.origin + nonce 校验）；
+  // 不再用 document.referrer 推宿主 origin——allow-same-origin 或
+  // localhost↔127.0.0.1 下 referrer 与宿主实际 origin 会不一致，
+  // 导致 postMessage 的 targetOrigin 抛「不匹配」错误。
   function send(type, payload) {
     payload = payload || {}
     payload.type = type
     payload.nonce = NONCE
-    if (hostOrigin) {
-      window.parent.postMessage(payload, hostOrigin)
-    }
+    window.parent.postMessage(payload, '*')
   }
 
   // ─── 截图（T1.2）────────────────────────────────────────────
@@ -831,10 +831,10 @@
 
   // ─── 消息分发 ───────────────────────────────────────────────
 
-  // 宿主 → iframe：来源 origin 与 referrer 一致 + nonce 匹配才接受
-  // （宿主侧 targetOrigin 用 '*'，安全靠本侧 origin + nonce 双重校验）
+  // 宿主 → iframe：以 nonce 匹配为准（宿主已通过 URL hash 下发不可猜 nonce）。
+  // 不再用 referrer 校验 origin——避免 localhost↔127.0.0.1 等导致误丢消息
+  // （与内部系统不收紧的决策一致）。
   window.addEventListener('message', function (event) {
-    if (!hostOrigin || event.origin !== hostOrigin) return
     var msg = event.data || {}
     if (!NONCE || msg.nonce !== NONCE) return
 
