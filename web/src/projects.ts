@@ -1,15 +1,21 @@
-/** 项目相关 API 与类型（T2.3 / T2.4）。 */
+/** 项目相关 API 与类型（T2.3 / T2.4；T8.1 去 Git 本地化修订）。 */
 import { api } from './api'
+
+/** 项目创建者（创建者权限体系：上传/导出/开关/管理） */
+export interface Creator {
+  id: number
+  name: string
+  email: string
+}
 
 export interface ProjectInfo {
   id: number
   project_id: string
   name: string
-  repo_url: string
-  branch: string
+  creator: Creator
+  is_creator: boolean
   commentable: boolean
-  last_sync_at: string | null
-  sync_error: string | null
+  content_updated_at: string | null
   created_at: string
 }
 
@@ -68,12 +74,8 @@ export function listProjects(): Promise<ProjectInfo[]> {
   return api.get<ProjectInfo[]>('/api/projects')
 }
 
-export function createProject(payload: {
-  name: string
-  repo_url: string
-  token: string
-  branch: string
-}): Promise<ProjectInfo> {
+/** 创建项目（T8.1）：只填名称；创建后为空项目，内容由上传接口补充（T8.2）。 */
+export function createProject(payload: { name: string }): Promise<ProjectInfo> {
   return api.post<ProjectInfo>('/api/projects', payload)
 }
 
@@ -90,11 +92,6 @@ export function getPrd(id: number, file: string): Promise<{ file: string; conten
 /** 对账明细（T3.3）：三态清单 + 重复 ID + 页面地图坏引用 */
 export function getReconcile(id: number): Promise<ReconcileDetail> {
   return api.get<ReconcileDetail>(`/api/projects/${id}/reconcile`)
-}
-
-/** 手动同步（临时按钮，T3.1）：fetch + ff-only 拉最新。T5.1 会升级为完整 SYNC_PULL。 */
-export function syncProject(id: number): Promise<ProjectInfo> {
-  return api.post<ProjectInfo>(`/api/projects/${id}/sync`)
 }
 
 /** 项目级「可评论」开关（T4.5）：关闭后全员评论入口置灰（已有评论可查看）。 */
@@ -137,7 +134,7 @@ export interface HighlightRect {
   h: number
 }
 
-/** 评论提交结果（POST /comments 响应：评论 JSON 全量 + 落仓任务状态） */
+/** 评论提交结果（POST /comments 响应：评论 JSON 全量；T8.1 起直写文件，无落仓任务） */
 export interface CreateCommentResult {
   comment_id: string
   author: string
@@ -153,8 +150,6 @@ export interface CreateCommentResult {
   highlight_rect?: HighlightRect
   doc_anchor_id?: string
   doc_excerpt?: string
-  /** T4.3 落仓任务（异步队列：请求返回时 pending，git 结果不阻塞提交） */
-  git_task: { id: number; status: string }
 }
 
 export function createComment(
@@ -222,7 +217,8 @@ export function batchStatus(
 }
 
 /** 截图上传（T1.2 链路）：Blob → /shots 临时区，返回访问 URL（预览用）。
- * slug 口径：临时区目录名与 /data/repos/{slug} 一致，评论提交时后端按 slug 取文件。 */
+ * slug 口径：临时区目录名与项目目录 /data/projects/{slug} 一致，
+ * 评论提交时后端按 slug 取文件并复制进项目 reviews/shots/（T8.1）。 */
 export function uploadShot(
   slug: string,
   blob: Blob,
