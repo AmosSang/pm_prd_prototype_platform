@@ -21,16 +21,18 @@ DB comments 表是展示缓存。
 """
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import zipfile
 
 import peewee
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, jsonify, request, send_file, session
 
 from server.models import Comment, Project, utcnow_str
-from server.projects import _list_md_files, _repo_root
+from server.projects import _list_md_files, _repo_root, _require_creator
 from server.reconcile import extract_prd_anchors
 from server.shots import SHOTS_DIR
 
@@ -599,3 +601,94 @@ def batch_status():
         "action": action, "to": rule["to"],
         "updated": updated, "skipped": skipped,
     }), 200
+
+
+# ───────────────────────── 评论导出（T8.3）─────────────────────────
+
+EXPORT_SCOPES = ("all", "confirmed")
+
+
+@bp.get("/api/projects/<int:pid>/comments/export")
+def export_comments(pid: int):
+    """导出评论 zip（T8.3，产品方案 §4.7 / 技术方案 §2.8）：仅创建者。
+
+    scope=all → 未删除评论全量（四态）；confirmed → 「已确认待修改」
+    （交付修改的标准范围，产品方案 §3.4）。评论 JSON 与截图取自项目目录
+    reviews/（事实源），导出包与之同构（AGENTS.md 硬规则 5）：
+    {project_id}-comments-{yyyymmdd}-{HHmm}/manifest.json + comments/ + shots/。
+    无评论时返回空包（manifest total=0）。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return jsonify(code=404, msg="项目不存在"), 404
+    deny = _require_creator(p)
+    if deny:
+        return deny
+
+    scope = (request.args.get("scope") or "").strip()
+    if scope not in EXPORT_SCOPES:
+        return jsonify(code=400, msg="scope 必须是 all 或 confirmed"), 400
+
+    q = Comment.select().where(Comment.project == p.id, Comment.deleted == False)  # noqa: E712
+    if scope == "confirmed":
+        q = q.where(Comment.status == "已确认待修改")
+    rows = list(q.order_by(Comment.id.asc()))
+
+    root = _repo_root(p)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+    prefix = f"{p.project_id}-comments-{stamp}"
+
+    manifest_comments: list[dict] = []
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for c in rows:
+            # 评论 JSON 以项目目录文件为准（事实源）；文件缺失时兜底 DB 缓存
+            cj: dict | None = None
+            fpath = os.path.join(root, "reviews", "comments", f"{c.comment_id}.json")
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        cj = json.load(f)
+                except (OSError, ValueError):
+                    cj = None
+            if cj is None:
+                cj = json.loads(c.payload_json)
+            zf.writestr(
+                f"{prefix}/comments/{c.comment_id}.json",
+                json.dumps(cj, ensure_ascii=False, indent=2),
+            )
+            # 截图：仅被导出评论引用且实际存在的（has_shot = 实际入包）
+            has_shot = False
+            if cj.get("screenshot"):
+                shot_path = os.path.join(root, "reviews", "shots", f"{c.comment_id}.png")
+                if os.path.isfile(shot_path):
+                    with open(shot_path, "rb") as sf:
+                        zf.writestr(f"{prefix}/shots/{c.comment_id}.png", sf.read())
+                    has_shot = True
+            manifest_comments.append({
+                "comment_id": c.comment_id,
+                "status": c.status,
+                "priority": c.priority,
+                "scope": c.scope,
+                "has_shot": has_shot,
+            })
+
+        manifest = {
+            "exported_at": utcnow_str(),
+            "project": {"id": p.project_id, "name": p.name},
+            "scope": scope,
+            "total": len(rows),
+            "comments": manifest_comments,
+        }
+        zf.writestr(
+            f"{prefix}/manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+        )
+
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{prefix}.zip",
+    )
