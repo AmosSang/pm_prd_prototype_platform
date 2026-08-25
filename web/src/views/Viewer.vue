@@ -15,6 +15,8 @@ import {
   listComments,
   listProjects,
   updateProject,
+  uploadPrototype,
+  uploadPrd,
   uploadShot,
   type CommentItem,
   type CommentPayload,
@@ -104,13 +106,69 @@ async function onCommentableChange(on: string | number | boolean) {
   }
 }
 
-// ───────────────────────── T8.3 评论导出（仅创建者） ─────────────────────────
-// 产品方案 §4.7：全部评论（归档/周报）或所有已确认待修改（交付修改范围）。
-// GET 下载走同源 cookie，浏览器直接落 zip。
+// ───────────────────── T8.3/T8.2 创建者工具区（导出 + 上传，仅创建者） ─────────────────────
+// 产品方案 §4.7：导出全部评论（归档/周报）或所有已确认待修改（交付修改范围）；
+// 上传原型 zip / PRD md 走 T8.2 创建者专属接口，成功后刷新 overview 与对账。
 function onExport(scope: string) {
   const id = overview.value?.project.id
   if (!id || (scope !== 'all' && scope !== 'confirmed')) return
   window.open(`/api/projects/${id}/comments/export?scope=${scope}`)
+}
+
+/** 创建者工具区下拉命令：export_all / export_confirmed / up_proto / up_prd */
+function onCreatorTool(cmd: string) {
+  if (cmd.startsWith('export_')) {
+    onExport(cmd === 'export_all' ? 'all' : 'confirmed')
+    return
+  }
+  if (cmd === 'up_proto') protoInput.value?.click()
+  else if (cmd === 'up_prd') prdInput.value?.click()
+}
+
+const protoInput = ref<HTMLInputElement | null>(null)
+const prdInput = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+
+async function onProtoPicked(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0]
+  const id = overview.value?.project.id
+  if (!f || !id) return
+  if (!f.name.toLowerCase().endsWith('.zip')) {
+    ElMessage.error('原型包必须是 zip 格式')
+    return
+  }
+  uploading.value = true
+  try {
+    await uploadPrototype(id, f)
+    ElMessage.success('原型上传成功，查看器已刷新')
+    await reloadOverview() // 刷新 overview（原型入口/对账/锚点）
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '上传失败')
+  } finally {
+    uploading.value = false
+    if (protoInput.value) protoInput.value.value = ''
+  }
+}
+
+async function onPrdPicked(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0]
+  const id = overview.value?.project.id
+  if (!f || !id) return
+  if (!f.name.toLowerCase().endsWith('.md')) {
+    ElMessage.error('仅支持 markdown 文档')
+    return
+  }
+  uploading.value = true
+  try {
+    await uploadPrd(id, f)
+    ElMessage.success('PRD 上传成功，查看器已刷新')
+    await reloadOverview()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '上传失败')
+  } finally {
+    uploading.value = false
+    if (prdInput.value) prdInput.value.value = ''
+  }
 }
 
 // ───────────────────────── T4.1/T4.2 评论模式与评论框 ─────────────────────────
@@ -538,7 +596,7 @@ function locateAnchor(anchorId: string) {
   const indexHit = overview.value.proto_anchor_index[anchorId]
   const targetEntry = mapHit?.proto || indexHit || currentEntry.value
   if (!targetEntry) {
-    ElMessage.info('仓库内未发现原型页面')
+    ElMessage.info('项目内未发现原型页面')
     return
   }
   if (targetEntry !== currentEntry.value) {
@@ -721,22 +779,36 @@ function onDividerUp() {
   dragging.value = false
 }
 
-onMounted(async () => {
-  window.addEventListener('message', onMessage)
-  try {
-    // slug → 列表反查数字 id（主键不进 URL，防猜测遍历）
-    const all = await listProjects()
-    const hit = all.find((p) => p.project_id === slug)
-    if (!hit) throw new Error('项目不存在')
-    overview.value = await getOverview(hit.id)
-  } catch (e) {
-    loadError.value = e instanceof Error ? e.message : '加载失败'
-  }
+/** 按 slug 反查项目并加载 overview，同步重置入口/文档/开关/评论（T8.2 上传后复用）。 */
+async function loadOverview() {
+  const all = await listProjects()
+  const hit = all.find((p) => p.project_id === slug)
+  if (!hit) throw new Error('项目不存在')
+  overview.value = await getOverview(hit.id)
   if (overview.value) {
     currentEntry.value = overview.value.proto_entries[0] || ''
     currentDoc.value = overview.value.docs[0] || ''
     commentable.value = overview.value.project.commentable // T4.5
     refreshComments() // T4.4：初始角标（含打开过的抽屉数据）
+  }
+  return overview.value
+}
+
+/** 上传成功后静默刷新（错误弹 toast，不阻塞用户继续操作）。 */
+async function reloadOverview() {
+  try {
+    await loadOverview()
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '刷新失败')
+  }
+}
+
+onMounted(async () => {
+  window.addEventListener('message', onMessage)
+  try {
+    await loadOverview()
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : '加载失败'
   }
 })
 onBeforeUnmount(() => {
@@ -787,20 +859,30 @@ onBeforeUnmount(() => {
       >
         评论 {{ comments.length }}
       </button>
-      <!-- T8.3 导出评论（仅创建者）：全部评论 / 所有已确认待修改（交付修改范围） -->
-      <el-dropdown v-if="overview.project.is_creator" @command="onExport">
-        <button class="drawer-toggle" data-testid="export-comments">导出评论 ▾</button>
+      <!-- T8.3/T8.2 创建者工具区（仅创建者）：上传原型/PRD + 导出评论（交付范围下拉） -->
+      <el-dropdown v-if="overview.project.is_creator" @command="onCreatorTool">
+        <button class="drawer-toggle" data-testid="creator-tools">
+          {{ uploading ? '处理中…' : '创建者工具 ▾' }}
+        </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="all" data-testid="export-option-all">
-              全部评论
+            <el-dropdown-item command="up_proto" data-testid="creator-upload-proto">
+              上传原型（zip）
             </el-dropdown-item>
-            <el-dropdown-item command="confirmed" data-testid="export-option-confirmed">
-              所有已确认待修改
+            <el-dropdown-item command="up_prd" data-testid="creator-upload-prd">
+              上传 PRD（markdown）
+            </el-dropdown-item>
+            <el-dropdown-item command="export_all" data-testid="export-option-all" divided>
+              导出全部评论
+            </el-dropdown-item>
+            <el-dropdown-item command="export_confirmed" data-testid="export-option-confirmed">
+              导出所有已确认待修改
             </el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
+      <input ref="protoInput" type="file" accept=".zip" class="hidden-input" data-testid="creator-proto-file" @change="onProtoPicked" />
+      <input ref="prdInput" type="file" accept=".md" class="hidden-input" data-testid="creator-prd-file" @change="onPrdPicked" />
       <!-- T3.3 对账提示条：匹配 · 缺失 · 未描述（点击看明细） -->
       <span
         v-if="reconSummary"
@@ -864,7 +946,7 @@ onBeforeUnmount(() => {
           :sandbox="sandboxAttr"
           data-testid="viewer-proto-frame"
         />
-        <p v-else class="empty">仓库内未发现 prototype/ 目录或 HTML 入口</p>
+        <p v-else class="empty">项目内未发现 prototype/ 目录或 HTML 入口</p>
         <!-- T4.2 评论框（三类入口共用：DOM 点击 / 评论本页 / 文档段落） -->
         <CommentBox
           v-if="capturedPayload"
@@ -917,7 +999,7 @@ onBeforeUnmount(() => {
         >
           <p v-if="docLoading" class="empty">加载中…</p>
           <p v-else-if="!overview.docs.length" class="empty">
-            仓库内未发现 markdown 文档（prd/ 目录或根目录 *.md）
+            项目内未发现 markdown 文档（prd/ 目录或根目录 *.md）
           </p>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <article v-else class="markdown-body" data-testid="prd-content" v-html="prdHtml" />
@@ -1193,6 +1275,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   white-space: nowrap;
 }
+.hidden-input { display: none; }
 .v-head .drawer-toggle:hover,
 .v-head .drawer-toggle.open {
   border-color: #2b5cff;

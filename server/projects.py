@@ -399,7 +399,7 @@ def overview(pid: int):
         return _err("项目不存在", 404)
     root = _repo_root(p)
     if not os.path.isdir(root):
-        return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
+        return _err("项目目录不存在（可能已被删除），请重新上传内容", 410)
 
     docs = _list_md_files(root)
     proto_files = _list_all_proto_html(root)
@@ -434,7 +434,7 @@ def reconcile_detail(pid: int):
         return _err("项目不存在", 404)
     root = _repo_root(p)
     if not os.path.isdir(root):
-        return _err("本地 clone 不存在（可能已被移动或删除），请重新绑定", 410)
+        return _err("项目目录不存在（可能已被删除），请重新上传内容", 410)
 
     def _read_doc(rel: str) -> str:
         full = os.path.realpath(os.path.join(root, *rel.split("/")))

@@ -221,7 +221,7 @@ async function saveEdit() {
 async function onDelete(c: CommentItem) {
   try {
     await ElMessageBox.confirm(
-      `删除评论 ${c.comment_id}？将同时删除仓库中的评论文件与截图。`,
+      `删除评论 ${c.comment_id}？将同时删除项目目录中的评论文件与截图。`,
       '删除评论',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
     )

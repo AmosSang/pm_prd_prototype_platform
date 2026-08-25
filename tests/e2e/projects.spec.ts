@@ -168,6 +168,47 @@ test.describe('T8.2 内容上传（创建者专属）', () => {
   })
 })
 
+test.describe('T8.6 Viewer 创建者工具区聚合', () => {
+  test('从查看器上传原型/PRD：聚合下拉触发上传并刷新', async ({ page, request }) => {
+    // 空项目（只建项目，无内容）→ 查看器空态
+    const proj = await createProject(request, '工具区E2E项目')
+    await page.goto('/')
+    const card = page.locator('.card').filter({ hasText: proj.project_id })
+    await card.getByTestId('open-project').click()
+    await expect(page).toHaveURL(new RegExp(`/project/${proj.project_id}`))
+    // 无内容空态（原型/PRD 都缺）
+    await expect(page.getByText('项目内未发现 prototype/ 目录或 HTML 入口')).toBeVisible()
+
+    // 创建者工具区：上传原型 zip
+    await page.getByTestId('creator-tools').click()
+    await page.getByTestId('creator-upload-proto').click()
+    await page.getByTestId('creator-proto-file').setInputFiles({
+      name: 'proto.zip',
+      mimeType: 'application/zip',
+      buffer: buildZip({
+        'index.html': '<html><body><main data-pa="page-login">工具区原型</main></body></html>',
+      }),
+    })
+    await expect(page.getByText('原型上传成功')).toBeVisible({ timeout: 15_000 })
+    // 查看器刷新：iframe 出现且 READY（不再空态）
+    await expect(page.getByTestId('viewer-proto-frame')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.ready[data-ready="true"]')).toBeVisible({ timeout: 15_000 })
+
+    // 上传 PRD
+    await page.getByTestId('creator-tools').click()
+    await page.getByTestId('creator-upload-prd').click()
+    await page.getByTestId('creator-prd-file').setInputFiles({
+      name: '需求.md',
+      mimeType: 'text/markdown',
+      buffer: Buffer.from('# 工具区 PRD\n\n## 5.1 登录页 <!-- pa: page-login -->\n', 'utf-8'),
+    })
+    await expect(page.getByText('PRD 上传成功')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('prd-content').locator('h1')).toHaveText('工具区 PRD', {
+      timeout: 10_000,
+    })
+  })
+})
+
 test.describe('T8.2 删除项目（创建者专属）', () => {
   test('确认删除 → 卡片消失 + 目录清除', async ({ page, request }) => {
     const proj = await createProject(request, '待删E2E项目')

@@ -53,9 +53,9 @@ test('T8.4 双用户权限：创建者可见专属按钮，普通用户不可见
   await expect(card.getByTestId(`del-${proj.project_id}`)).toBeVisible()
   await expect(card.getByTestId(`upload-${proj.project_id}`)).toBeVisible()
 
-  // 创建者视角：查看器有导出 /「可评论」开关
+  // 创建者视角：查看器有创建者工具区（上传+导出）与「可评论」开关
   await card.getByTestId('open-project').click()
-  await expect(page.getByTestId('export-comments')).toBeVisible()
+  await expect(page.getByTestId('creator-tools')).toBeVisible()
   await expect(page.getByTestId('commentable-toggle')).toBeVisible()
 
   // 第二个登录用户（非创建者）
@@ -68,9 +68,9 @@ test('T8.4 双用户权限：创建者可见专属按钮，普通用户不可见
   await expect(card2.getByTestId(`del-${proj.project_id}`)).toHaveCount(0)
   await expect(card2.getByTestId(`upload-${proj.project_id}`)).toHaveCount(0)
 
-  // 普通用户视角：查看器无导出 /「可评论」开关
+  // 普通用户视角：查看器无创建者工具区 /「可评论」开关
   await card2.getByTestId('open-project').click()
-  await expect(p2.getByTestId('export-comments')).toHaveCount(0)
+  await expect(p2.getByTestId('creator-tools')).toHaveCount(0)
   await expect(p2.getByTestId('commentable-toggle')).toHaveCount(0)
 
   // 接口 403：普通用户调创建者专属接口

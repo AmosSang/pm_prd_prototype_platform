@@ -61,7 +61,7 @@ print(f'[smoke] 清理 e2e 频控记录 {n} 条')
 from server.config import PROJECTS_DIR
 import os
 e2e_projects = list(Project.select().where(
-    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目'])
+    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目', '工具区E2E项目'])
     | Project.name.startswith('同步E2E-')
 ))
 e2e_ids = [p.id for p in e2e_projects]

@@ -777,7 +777,7 @@ test.describe('T8.3 评论导出', () => {
     expect(r.ok()).toBeTruthy()
 
     // 顶栏导出（创建者工具区）：全部评论
-    await page.getByTestId('export-comments').click()
+    await page.getByTestId('creator-tools').click()
     const dl1Promise = page.waitForEvent('download')
     await page.getByTestId('export-option-all').click()
     const dl1 = await dl1Promise
@@ -808,7 +808,7 @@ test.describe('T8.3 评论导出', () => {
     expect(fs.existsSync(path.join(dir, top, 'shots', `${d2.comment_id}.png`))).toBe(false)
 
     // 已确认待修改范围：仅 d1
-    await page.getByTestId('export-comments').click()
+    await page.getByTestId('creator-tools').click()
     const dl2Promise = page.waitForEvent('download')
     await page.getByTestId('export-option-confirmed').click()
     const dl2 = await dl2Promise
