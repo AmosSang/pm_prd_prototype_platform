@@ -22,15 +22,17 @@ PROJECT_ID = re.compile(r"^[a-z0-9-]{1,32}$")
 
 INJECT_TAG = '<script src="/bridge.js"></script>'
 
-# T 增强：早期自愈护栏（注入 <head>）。原型自身的脚本可能在解析/运行时崩溃或改写
-# 文档（document.write 整页重写、body.innerHTML 替换等），导致 </body> 前注入的
-# bridge.js 标签被销毁、bridge 永不运行 → 查看器永久「加载中…」且锚点失效。
-# 护栏：先记住 URL hash 里的 nonce 到 window.__PP_NONCE__（bridge 幂等读取），
-# 再在 DOMContentLoaded 后轮询补挂 bridge.js，直到 bridge 上报 __PP_BRIDGE__。
+# T 增强：早期自愈护栏（注入 <head>）。原型自身的脚本可能在解析/运行时崩溃、改写
+# 文档（document.write 整页重写、body.innerHTML 替换）或整页跳走（location.href），
+# 导致 </body> 前注入的 bridge.js 标签被销毁/跳过、bridge 永不运行 → 查看器永久
+# 「加载中…」且锚点失效。护栏：先把 URL hash 里的 nonce 记到 window.__PP_NONCE__
+# 并写入 sessionStorage（跨页跳转后 bridge 仍能从 sessionStorage 恢复 nonce；allow-
+# same-origin 下同源共享），再在 DOMContentLoaded 后轮询补挂 bridge.js 直到就绪。
 _BRIDGE_GUARD_JS = (
     "(function(){"
     "var m=/(?:^|#)pp-nonce=([A-Za-z0-9_-]+)/.exec(location.hash);"
-    "try{window.__PP_NONCE__=m?m[1]:window.__PP_NONCE__||null}catch(e){}"
+    "var n=m?m[1]:(window.__PP_NONCE__||null);"
+    "if(n){try{window.__PP_NONCE__=n;window.sessionStorage.setItem('pp_nonce',n)}catch(e){}}"
     "var tries=0;"
     "function ensure(){"
     "try{"
