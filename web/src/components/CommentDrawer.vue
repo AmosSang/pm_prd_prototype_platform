@@ -249,6 +249,49 @@ function canEdit(c: CommentItem): boolean {
   )
 }
 
+// ───────────────── T8.5 抽屉增强：单条标记已修改 + 截图放大 ─────────────────
+
+/** 单条「标记已修改」：创建者专属，仅「已确认待修改」态（状态闭环不依赖 Agent 回写）。 */
+function canMarkDone(c: CommentItem): boolean {
+  return (
+    props.isCreator &&
+    props.commentable !== false &&
+    c.status === '已确认待修改'
+  )
+}
+
+async function markDoneOne(c: CommentItem) {
+  if (busy.value) return
+  busy.value = true
+  try {
+    const res = await batchStatus([c.comment_id], 'mark_done')
+    if (res.updated.length) {
+      ElMessage.success('已标记为已修改')
+      emit('refresh')
+    } else {
+      ElMessage.warning(res.skipped[0]?.reason || '不可操作')
+    }
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 截图缩略图放大：全屏遮罩预览当前评论截图（T8.5）。 */
+const previewShot = ref<CommentItem | null>(null)
+function openShot(c: CommentItem) {
+  previewShot.value = c
+}
+function closeShot() {
+  previewShot.value = null
+}
+
+/** 评论截图 URL（T8.5：项目目录截图服务接口）。 */
+function shotUrl(c: CommentItem): string {
+  return `/api/comments/${c.comment_id}/shot`
+}
+
 function statusTagType(s: CommentStatus): 'info' | 'warning' | 'success' | 'danger' {
   if (s === '待确认') return 'warning'
   if (s === '已确认待修改') return 'danger'
@@ -403,6 +446,17 @@ watch(
                     >
                       定位
                     </button>
+                    <!-- T8.5 单条标记已修改（创建者，仅已确认待修改态） -->
+                    <button
+                      v-if="canMarkDone(c)"
+                      class="op mark"
+                      :disabled="busy"
+                      :data-testid="`mark-done-${c.comment_id}`"
+                      title="已确认待修改 → 已修改（状态闭环，创建者）"
+                      @click="markDoneOne(c)"
+                    >
+                      标记已修改
+                    </button>
                     <template v-if="canEdit(c)">
                       <button class="op" data-testid="edit-comment" @click="startEdit(c)">编辑</button>
                       <button class="op danger" data-testid="del-comment" @click="onDelete(c)">删除</button>
@@ -410,6 +464,24 @@ watch(
                   </span>
                 </div>
                 <p class="content">{{ c.payload.content }}</p>
+                <!-- T8.5 文档段落摘录块：doc_block 评论或 DOM 评论派生 doc_excerpt 的展示锚定段落 -->
+                <div v-if="c.payload.doc_excerpt" class="doc-excerpt" data-testid="doc-excerpt">
+                  <span class="de-label">{{
+                    c.payload.doc_anchor_id || c.payload.doc_path || '文档段落'
+                  }}</span>
+                  {{ c.payload.doc_excerpt }}
+                </div>
+                <!-- T8.5 截图缩略图：有截图的评论展示，点击放大 -->
+                <img
+                  v-if="c.payload.screenshot"
+                  :src="shotUrl(c)"
+                  class="shot-thumb"
+                  :data-testid="`shot-thumb-${c.comment_id}`"
+                  alt="评论截图缩略图"
+                  title="点击放大查看截图"
+                  loading="lazy"
+                  @click="openShot(c)"
+                />
               </div>
             </article>
           </template>
@@ -451,6 +523,17 @@ watch(
             保存
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- T8.5 截图放大遮罩（点击缩略图打开，遮罩关闭） -->
+    <div v-if="previewShot" class="shot-mask" data-testid="shot-preview-mask" @click.self="closeShot">
+      <div class="shot-box">
+        <div class="shot-head">
+          <code>{{ previewShot.comment_id }}</code>
+          <button class="op" data-testid="shot-close" @click="closeShot">关闭</button>
+        </div>
+        <img :src="shotUrl(previewShot)" alt="评论截图放大" data-testid="shot-preview-img" />
       </div>
     </div>
   </div>
@@ -572,6 +655,74 @@ watch(
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+/* T8.5 文档段落摘录块 */
+.doc-excerpt {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #f0f6ff;
+  border-left: 3px solid #2b5cff;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #33415c;
+  line-height: 1.45;
+}
+.doc-excerpt .de-label {
+  display: inline-block;
+  margin-right: 6px;
+  color: #2b5cff;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* T8.5 截图缩略图 */
+.shot-thumb {
+  display: block;
+  margin-top: 6px;
+  max-width: 220px;
+  max-height: 120px;
+  border: 1px solid #d8dde4;
+  border-radius: 6px;
+  cursor: zoom-in;
+  background: #f6f8fa;
+}
+
+/* T8.5 截图放大遮罩 */
+.shot-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+}
+.shot-box {
+  background: #fff;
+  border-radius: 8px;
+  padding: 10px 14px;
+  max-width: 92vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.shot-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #24292f;
+}
+.shot-head .op { margin-left: auto; }
+.shot-box img {
+  max-width: 90vw;
+  max-height: 80vh;
+  border-radius: 4px;
+  object-fit: contain;
+  background: #fff;
 }
 
 /* 编辑弹层 */

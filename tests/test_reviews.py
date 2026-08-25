@@ -830,3 +830,39 @@ class TestExportComments:
         resp = client.get(f"/api/projects/{p.id}/comments/export?scope=everything")
         assert resp.status_code == 400
         assert "scope" in resp.get_json()["msg"]
+
+
+class TestCommentShot:
+    """T8.5 评论截图接口：抽屉缩略图用（项目目录 reviews/shots/{cid}.png）。"""
+
+    def test_shot_hit(self, app, project):
+        """有截图的评论：可访问且为 PNG（含红框图）。"""
+        client, p = project
+        _, projects_dir, shots_dir = app
+        tmp_shot = Path(shots_dir) / p.project_id / "shot-view.png"
+        tmp_shot.parent.mkdir(parents=True, exist_ok=True)
+        tmp_shot.write_bytes(b"\x89PNG\r\n\x1a\nshot-view")
+
+        resp = _submit(client, p, _dom_payload(), shot_id="shot-view", highlight_rect={"x": 1, "y": 2, "w": 3, "h": 4})
+        assert resp.status_code == 200, resp.get_json()
+        cid = resp.get_json()["data"]["comment_id"]
+
+        shot = client.get(f"/api/comments/{cid}/shot")
+        assert shot.status_code == 200
+        assert shot.mimetype == "image/png"
+        assert shot.data == b"\x89PNG\r\n\x1a\nshot-view"
+
+    def test_shot_miss(self, app, project):
+        """无截图评论 / 不存在评论：404。"""
+        client, p = project
+        c_doc = _submit_simple(client, p, target_type="doc_block", prototype_page="",
+                                anchor_id="", nearest_anchor_id="", css_path="",
+                                outer_html="", text_excerpt="无截图文档评论",
+                                doc_anchor_id="", doc_excerpt="无截图", doc_path="5.1",
+                                scope="doc")
+        resp = client.get(f"/api/comments/{c_doc}/shot")
+        assert resp.status_code == 404
+        assert "无截图" in resp.get_json()["msg"]
+
+        resp = client.get("/api/comments/c-20990101-404/shot")
+        assert resp.status_code == 404
