@@ -31,6 +31,15 @@
   // 从 URL hash 取宿主下发的 nonce
   var m = /(?:^|#)pp-nonce=([A-Za-z0-9_-]+)/.exec(window.location.hash)
   var NONCE = m ? m[1] : null
+  // 原型内部跳转（a href / location.href 等）会丢掉 URL hash 里的 #pp-nonce，
+  // 新页面 bridge 的 NONCE 变 null，发往宿主的消息（ANCHOR_CLICK 等）会被
+  // nonce 校验拒绝、锚点定位失灵。用同源 sessionStorage 记住 nonce 跨页恢复
+  // （allow-same-origin 下可用；沙箱无存储时 try 兜底回退为仅 hash）。
+  if (NONCE) {
+    try { window.sessionStorage.setItem('pp_nonce', NONCE) } catch (e) { /* 忽略 */ }
+  } else {
+    try { NONCE = window.sessionStorage.getItem('pp_nonce') || null } catch (e) { /* 忽略 */ }
+  }
 
   // 认证：nonce 由宿主写进附件 URL hash，是双向消息的真正口令。
   // 发送目标 origin 用 '*'（宿主 onMessage 已按 event.origin + nonce 校验）；
