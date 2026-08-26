@@ -13,7 +13,10 @@ async function onLogout() {
 <template>
   <div class="app-shell">
     <header v-if="currentUser" class="app-bar" data-testid="app-bar">
-      <span class="brand">产品方案展示平台</span>
+      <span class="brand">
+        <span class="brand-dot" aria-hidden="true" />
+        产品方案展示平台
+      </span>
       <span class="spacer" />
       <router-link v-if="currentUser.is_admin" class="admin-link" data-testid="user-manage" to="/users">
         用户管理
@@ -32,15 +35,33 @@ async function onLogout() {
   align-items: center;
   gap: 12px;
   padding: 0 20px;
-  height: 44px;
-  background: #1f2430;
-  color: #fff;
+  height: 48px;
+  background: var(--pp-surface);
+  border-bottom: 1px solid var(--pp-border);
   font-size: 13px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
 }
-.brand { font-weight: 600; letter-spacing: 0.5px; }
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--pp-text-1);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #4f63d2 0%, #7d8de0 100%);
+  box-shadow: 0 1px 3px rgba(79, 99, 210, 0.4);
+}
 .spacer { flex: 1; }
-.user { color: #c8ccd4; }
-.logout { color: #8ab4ff; cursor: pointer; }
-.admin-link { color: #8ab4ff; text-decoration: none; }
-.admin-link:hover { text-decoration: underline; }
+.user { color: var(--pp-text-3); }
+.logout { color: var(--pp-primary); cursor: pointer; }
+.logout:hover { color: var(--pp-primary-hover); }
+.admin-link { color: var(--pp-text-2); text-decoration: none; }
+.admin-link:hover { color: var(--pp-primary); }
 </style>

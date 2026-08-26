@@ -178,7 +178,9 @@ onMounted(async () => {
         class="card"
         :data-testid="`project-card-${p.project_id}`"
       >
-        <h2>{{ p.name }}</h2>
+        <div class="card-head">
+          <h2>{{ p.name }}</h2>
+        </div>
         <p class="meta">{{ p.project_id }} · 创建者 {{ p.creator.name }}</p>
         <p v-if="p.content_updated_at" class="meta">内容更新于 {{ p.content_updated_at.slice(0, 10) }}</p>
         <div class="card-actions">
@@ -214,9 +216,10 @@ onMounted(async () => {
         </div>
       </div>
 
-      <p v-if="projects.length === 0" class="hint">
-        还没有项目，点右上角「新建项目」开始
-      </p>
+      <div v-if="projects.length === 0" class="empty-state">
+        <p class="empty-title">还没有项目</p>
+        <p class="hint">点右上角「新建项目」开始</p>
+      </div>
     </section>
 
     <el-dialog v-model="dialogVisible" title="新建项目" width="520px">
@@ -288,44 +291,90 @@ onMounted(async () => {
 .home {
   max-width: 960px;
   margin: 0 auto;
-  padding: 24px 20px;
-  font-family: system-ui, -apple-system, 'PingFang SC', sans-serif;
+  padding: 28px 20px 48px;
+  font-family: var(--pp-font);
 }
 .bar {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 22px;
 }
 .bar h1 {
-  font-size: 20px;
+  font-size: 22px;
   margin: 0;
+  font-weight: 600;
+  letter-spacing: 0.2px;
 }
-.status { color: #888; font-size: 13px; }
-.checking { color: #999; }
-.ok { color: #2e9e44; font-weight: 600; }
-.fail { color: #d33; font-weight: 600; }
+.status {
+  color: var(--pp-text-3);
+  font-size: 13px;
+  padding: 3px 10px;
+  background: var(--pp-surface);
+  border: 1px solid var(--pp-border);
+  border-radius: 999px;
+}
+.checking { color: var(--pp-text-3); }
+.ok { color: var(--pp-success); font-weight: 600; }
+.fail { color: var(--pp-danger); font-weight: 600; }
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 16px;
 }
 .card {
-  background: #fff;
-  border: 1px solid #e6e8ec;
-  border-radius: 10px;
-  padding: 16px 18px;
+  background: var(--pp-surface);
+  border: 1px solid var(--pp-border);
+  border-radius: var(--pp-radius);
+  padding: 18px 20px 14px;
+  box-shadow: var(--pp-shadow-sm);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  display: flex;
+  flex-direction: column;
 }
-.card h2 { font-size: 15px; margin: 0 0 6px; }
-.card .meta { color: #999; font-size: 12px; margin: 0 0 8px; }
-.card .err { color: #d33; font-size: 12px; }
-.card-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.card:hover {
+  border-color: var(--pp-primary-soft-2);
+  box-shadow: var(--pp-shadow-hover);
+  transform: translateY(-2px);
+}
+.card-head h2 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+.card .meta { color: var(--pp-text-3); font-size: 12px; margin: 0 0 6px; }
+.card .err { color: var(--pp-danger); font-size: 12px; }
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px dashed var(--pp-border);
+}
 .owner-actions { display: inline-flex; gap: 8px; }
-.card .open { color: #3b82f6; text-decoration: none; font-size: 13px; display: inline-block; }
-.hint { color: #999; font-size: 13px; }
-.upload-zone { margin-bottom: 20px; }
-.upload-zone h3 { font-size: 14px; margin: 0 0 4px; }
-.upload-zone .tip { color: #999; font-size: 12px; margin: 0 0 10px; }
+.card .open {
+  color: var(--pp-primary);
+  text-decoration: none;
+  font-size: 13px;
+  display: inline-block;
+  font-weight: 500;
+}
+.card .open:hover { color: var(--pp-primary-hover); }
+.hint { color: var(--pp-text-3); font-size: 13px; }
+.empty-state {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 48px 0 40px;
+  background: var(--pp-surface);
+  border: 1px dashed var(--pp-border);
+  border-radius: var(--pp-radius);
+}
+.empty-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--pp-text-2);
+}
+.upload-zone { margin-bottom: 22px; }
+.upload-zone h3 { font-size: 14px; margin: 0 0 4px; font-weight: 600; }
+.upload-zone .tip { color: var(--pp-text-3); font-size: 12px; margin: 0 0 10px; }
 .upload-zone .el-progress { margin-bottom: 10px; max-width: 360px; }
 .hidden-input { display: none; }
 </style>

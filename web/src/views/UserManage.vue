@@ -216,15 +216,15 @@ onMounted(refresh)
 .user-manage {
   max-width: 960px;
   margin: 0 auto;
-  padding: 24px 20px;
-  font-family: system-ui, -apple-system, 'PingFang SC', sans-serif;
+  padding: 28px 20px 48px;
+  font-family: var(--pp-font);
 }
 .bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 22px;
 }
-.bar h1 { font-size: 20px; margin: 0; }
-.hint { color: #999; font-size: 13px; }
+.bar h1 { font-size: 22px; margin: 0; font-weight: 600; letter-spacing: 0.2px; }
+.hint { color: var(--pp-text-3); font-size: 13px; }
 </style>

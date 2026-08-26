@@ -1,10 +1,165 @@
-/* 全局基础样式。
- * body margin 归零：viewer 布局为 app-bar(44px) + .viewer(100vh-44px)，
- * 若保留浏览器默认 body margin 8px×2，页面会多出 16px 可滚动空隙——
- * 宿主页可滚会连带影响 iframe 视口位置稳定性（T3.1 渐隐用例排障结论：
- * 滚动 8px 后回滚使 iframe 平移 16px，绝对坐标点击落空），且用户
- * 也可能意外滚出缝隙，归零是一劳永逸的修复。
- */
+/* ============================================================
+ * 全局基础样式 + 设计 token（UI 翻新 2026-08）
+ * 原则：简洁、专业、大方；不引入新依赖，仅视觉层。
+ * token 同时驱动 Element Plus 主题（--el-* 变量覆写）与
+ * 各视图自定义样式（var(--pp-*)）。
+ * ============================================================ */
+
+:root {
+  /* ---- 品牌色板：靛蓝主色（沉稳、可访问） ---- */
+  --pp-primary: #4f63d2;
+  --pp-primary-hover: #3d51c4;
+  --pp-primary-active: #3244a8;
+  --pp-primary-soft: #eef1fc;
+  --pp-primary-soft-2: #e2e7fa;
+
+  /* ---- 中性色板：暖灰纸感 ---- */
+  --pp-bg: #f7f8fa;            /* 页面底色（非纯灰，微暖） */
+  --pp-surface: #ffffff;       /* 卡片/面板面 */
+  --pp-surface-2: #f4f5f8;     /* 欔级面（pane 头、代码块底） */
+  --pp-border: #e5e7ec;        /* 常规描边 */
+  --pp-border-strong: #d4d8e0; /* 控件描边（input/select） */
+  --pp-text-1: #1f2329;        /* 主文本 */
+  --pp-text-2: #4e5561;        /* 次级文本 */
+  --pp-text-3: #8a919c;        /* 弱化文本/占位 */
+  --pp-text-4: #b0b6bf;        /* 最弱（时间戳等） */
+
+  /* ---- 语义色 ---- */
+  --pp-success: #2e9e44;
+  --pp-success-bg: #eef9f0;
+  --pp-warning: #b8860b;
+  --pp-warning-bg: #fdf6e7;
+  --pp-danger: #d93a3f;
+  --pp-danger-bg: #fdeeee;
+  --pp-info: #8a919c;
+
+  /* ---- 圆角刻度 ---- */
+  --pp-radius: 12px;    /* 卡片/面板 */
+  --pp-radius-sm: 8px;  /* 按钮/输入框 */
+  --pp-radius-xs: 6px;  /* 小标签 */
+
+  /* ---- 阴影系统（低饱和蓝灰，避免死黑） ---- */
+  --pp-shadow-sm: 0 1px 3px rgba(31, 42, 68, 0.06);
+  --pp-shadow: 0 2px 8px rgba(31, 42, 68, 0.07), 0 1px 2px rgba(31, 42, 68, 0.04);
+  --pp-shadow-lg: 0 8px 24px rgba(31, 42, 68, 0.1), 0 2px 6px rgba(31, 42, 68, 0.06);
+  --pp-shadow-hover: 0 6px 16px rgba(79, 99, 210, 0.12), 0 2px 4px rgba(31, 42, 68, 0.06);
+
+  /* ---- 间距节奏（4px 栅格） ---- */
+  --pp-gap: 16px;
+
+  /* ---- 字体 ---- */
+  --pp-font: system-ui, -apple-system, 'PingFang SC', 'Segoe UI', sans-serif;
+  --pp-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- Element Plus 主题覆写（运行时 CSS 变量，无需重编译主题） ---- */
+:root {
+  --el-color-primary: var(--pp-primary);
+  --el-color-primary-light-3: #7d8de0;
+  --el-color-primary-light-5: #a3aeeb;
+  --el-color-primary-light-7: #c9d0f4;
+  --el-color-primary-light-8: #dbe0f8;
+  --el-color-primary-light-9: var(--pp-primary-soft);
+  --el-color-primary-dark-2: var(--pp-primary-hover);
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 999px;
+  --el-font-size-base: 14px;
+  --el-text-color-primary: var(--pp-text-1);
+  --el-text-color-regular: var(--pp-text-2);
+  --el-text-color-secondary: var(--pp-text-3);
+  --el-text-color-placeholder: var(--pp-text-4);
+  --el-border-color: var(--pp-border-strong);
+  --el-border-color-light: var(--pp-border);
+  --el-border-color-lighter: var(--pp-border);
+  --el-fill-color-blank: var(--pp-surface);
+  --el-fill-color-light: var(--pp-surface-2);
+  --el-font-family: var(--pp-font);
+  --el-box-shadow-light: var(--pp-shadow);
+  --el-box-shadow: var(--pp-shadow-lg);
+}
+
 body {
   margin: 0;
+  /* viewer 布局为 app-bar(48px) + .viewer(100vh-48px)：
+   * body margin 归零同前（T3.1 排障结论：宿主页可滚会影响 iframe 视口稳定性）。
+   * 全局背景换成 token 化纸白，登录页/首页共享。 */
+  background: var(--pp-bg);
+  color: var(--pp-text-1);
+  font-family: var(--pp-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Element Plus 通用细节修饰 ---- */
+/* 主按钮统一带轻投影，hover 微提亮 */
+.el-button--primary {
+  box-shadow: 0 1px 4px rgba(79, 99, 210, 0.28);
+  font-weight: 500;
+}
+.el-button--primary:not(.is-disabled):hover {
+  box-shadow: 0 2px 8px rgba(79, 99, 210, 0.34);
+}
+
+/* 对话框圆角与标题字重 */
+.el-dialog {
+  border-radius: var(--pp-radius);
+}
+.el-dialog__title { font-weight: 600; }
+
+/* 输入聚焦光环统一为品牌色的低饱和 halo */
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--pp-primary) inset, 0 0 0 3px rgba(79, 99, 210, 0.12) !important;
+}
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--pp-primary) inset, 0 0 0 3px rgba(79, 99, 210, 0.12) !important;
+}
+
+/* 标签微调 */
+.el-tag { border-radius: var(--pp-radius-xs); font-weight: 500; }
+.el-tag--warning { --el-tag-bg-color: var(--pp-warning-bg); }
+
+/* 表格观感 */
+.el-table {
+  --el-table-border-color: var(--pp-border);
+  --el-table-header-bg-color: var(--pp-surface-2);
+  --el-table-row-hover-bg-color: var(--pp-primary-soft);
+  border-radius: var(--pp-radius-sm);
+  overflow: hidden;
+}
+.el-table th.el-table__cell {
+  font-weight: 600;
+  color: var(--pp-text-2);
+}
+
+/* 下拉菜单圆角与投影 */
+.el-dropdown-menu,
+.el-select-dropdown {
+  border-radius: var(--pp-radius-sm);
+}
+.el-popper.is-light { border-radius: var(--pp-radius-sm); }
+
+/* 消息提示圆角 */
+.el-message { border-radius: var(--pp-radius-sm); }
+
+/* 进度条圆头 */
+.el-progress-bar__inner { border-radius: 999px; }
+
+/* 滚动条细化（Webkit），与整体精致感统一 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: #cdd2db;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #b3bac5; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 可达性：尊重减少动态偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
