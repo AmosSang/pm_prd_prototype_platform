@@ -37,7 +37,7 @@ import {
  * T3.1 正向联动：bridge 上报 ANCHOR_CLICK（点原型锚点 icon ◈）→
  * 右侧 [data-pa] 元素 scrollIntoView + 高亮 2s（anchor-highlight class）。
  * T3.2 反向联动：文档段落 hover「定位」按钮 → 查页面地图（锚点 → 原型文件）
- * → 跨页先切 iframe src（等 READY）→ 发 HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
+ * → 跨页先切 iframe src（等 READY）→ 发 GOTO_ANCHOR 揭示流水线（bridge 滚动+闪烁）。
  * 跨文档：锚点不在当前文档时切文档再定位（正向反向共用）。
  * T3.3 对账：顶栏提示条（匹配 · 缺失 · 未描述），点击拉明细弹窗
  * （三态 + 重复 ID + 页面地图坏引用，数据来自服务端静态解析）。
@@ -240,7 +240,7 @@ function resetCommentBox() {
 }
 
 function postSetCommentMode(enabled: boolean) {
-  // targetOrigin '*'：同 postHighlight 的沙箱约束（不透明 origin 为 "null"）
+  // targetOrigin '*'：同 postGoto 的沙箱约束（不透明 origin 为 "null"）
   iframeEl.value?.contentWindow?.postMessage(
     { type: 'SET_COMMENT_MODE', enabled, nonce },
     '*',
@@ -365,11 +365,11 @@ function onMessage(event: MessageEvent) {
     if (commentMode.value) postSetCommentMode(true)
     // 角标 sticky：切页后重发当前页角标（评论数据已在宿主内存）
     syncBadges()
-    // 跨页定位：切页后等 READY 再发 HIGHLIGHT_ANCHOR（技术方案 §2.5）
+    // 跨页定位：切页后等 READY 再发 GOTO_ANCHOR（揭示流水线，G2）
     if (pendingHighlight.value) {
       const target = pendingHighlight.value
       pendingHighlight.value = null
-      postHighlight(target)
+      postGoto(target).then((res) => gotoToast(res, target.anchorId))
     }
   }
   if (msg.type === 'ANCHOR_REPORT' && Array.isArray(msg.anchors)) {
@@ -379,7 +379,15 @@ function onMessage(event: MessageEvent) {
     jumpToDocAnchor(msg.anchorId)
   }
   if (msg.type === 'HIGHLIGHT_ACK' && msg.hit === false) {
+    // 兼容保留：bridge 升级前旧消息形态；新链路走 GOTO_ACK
     ElMessage.info(`锚点「${msg.anchorId}」在原型中缺失`)
+  }
+  if (msg.type === 'GOTO_ACK' && typeof msg.requestId === 'string') {
+    const w = gotoWaiters.get(msg.requestId)
+    if (w) {
+      gotoWaiters.delete(msg.requestId)
+      w({ hit: !!msg.hit, reason: String(msg.reason || 'ok') })
+    }
   }
   if (msg.type === 'ELEMENT_SELECTED' && msg.payload) {
     // 采集到目标（DOM 点击 / COLLECT_PAGE）：打开评论框。
@@ -490,7 +498,7 @@ async function locateComment(c: CommentItem) {
     ready.value = false
     currentEntry.value = targetEntry
   } else {
-    postHighlight(target)
+    postGoto(target).then((res) => gotoToast(res, target.anchorId))
   }
 }
 
@@ -563,7 +571,7 @@ function syncBadges() {
 // ───────────────────────── 锚点联动（T3.1 正向 / T3.2 反向）─────────────
 // 正向：点原型锚点 icon → 右侧文档滚动到 [data-pa=id] 段落 + 高亮 2s。
 // 反向：点文档「定位」→ 查页面地图 → 跨页先切 iframe（等 READY）→ 发
-// HIGHLIGHT_ANCHOR（bridge 滚动+闪烁）。
+// GOTO_ANCHOR 揭示流水线（bridge 先揭示再滚动+闪烁）。
 let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 文档容器内查锚点元素（当前已渲染的文档）。data-pa 可能为多锚点（空格分隔），
@@ -623,7 +631,9 @@ function cssEscape(s: string): string {
 
 // ───────────────────────── T3.2 反向联动 ─────────────────────────
 // 文档段落 hover「定位」按钮 → 原型侧滚动闪烁。跨页：查页面地图（页面锚点
-// → 原型文件）先切 iframe src，等 READY 后发 HIGHLIGHT_ANCHOR。
+// → 原型文件）先切 iframe src，等 READY 后发 GOTO_ANCHOR。
+// GOTO 揭示流水线（G2）：目标在未激活 Tab / 未触发弹窗 / 未展开折叠区时，
+// bridge 先程序化激活开合控件再定位（见《GOTO_ANCHOR揭示流水线-技术方案-V1.md》）。
 // T4.4 评论定位共用：目标可为 {anchorId}（锚点）或 {cssPath}（无锚点
 // dom 评论的 css_path / page 评论的 'body' 整页闪烁）。
 interface HighlightTarget {
@@ -632,14 +642,50 @@ interface HighlightTarget {
 }
 const pendingHighlight = ref<HighlightTarget | null>(null)
 
-function postHighlight(target: HighlightTarget) {
-  // targetOrigin '*'：sandbox iframe（无 allow-same-origin）的 origin 是
-  // 不透明 "null"，指定具体 origin 会被浏览器拒发。安全靠 bridge 侧
-  // origin + nonce 双重校验（技术方案 §2.2，与反向消息同规约）
-  iframeEl.value?.contentWindow?.postMessage(
-    { type: 'HIGHLIGHT_ANCHOR', anchorId: target.anchorId, cssPath: target.cssPath, nonce },
-    '*',
-  )
+/** GOTO_ACK 等待器（requestId → resolve）。3s 超时兜底：bridge 未回
+ * （极端：消息被吞/bridge 未加载）按 reason='timeout' 降级提示。 */
+const gotoWaiters = new Map<string, (res: { hit: boolean; reason: string }) => void>()
+const GOTO_TIMEOUT_MS = 3000
+
+function postGoto(target: HighlightTarget): Promise<{ hit: boolean; reason: string }> {
+  return new Promise((resolve) => {
+    const requestId = 'goto-' + Math.random().toString(36).slice(2, 10)
+    const timer = setTimeout(() => {
+      if (gotoWaiters.delete(requestId)) resolve({ hit: false, reason: 'timeout' })
+    }, GOTO_TIMEOUT_MS)
+    gotoWaiters.set(requestId, (res) => {
+      clearTimeout(timer)
+      resolve(res)
+    })
+    // targetOrigin '*'：sandbox iframe（无 allow-same-origin）的 origin 是
+    // 不透明 "null"，指定具体 origin 会被浏览器拒发。安全靠 bridge 侧
+    // origin + nonce 双重校验（技术方案 §2.2，与反向消息同规约）
+    iframeEl.value?.contentWindow?.postMessage(
+      {
+        type: 'GOTO_ANCHOR',
+        requestId,
+        anchorId: target.anchorId,
+        cssPath: target.cssPath,
+        nonce,
+      },
+      '*',
+    )
+  })
+}
+
+/** GOTO 结果 → 用户提示。hit=true bridge 已完成闪烁，无需提示。 */
+function gotoToast(res: { hit: boolean; reason: string }, anchorId?: string) {
+  if (res.hit) return
+  if (res.reason === 'not_found' || res.reason === 'timeout') {
+    ElMessage.info(`锚点「${anchorId || ''}」在原型中缺失`)
+  } else if (res.reason === 'no_trigger') {
+    ElMessage.info(
+      '该元素位于未打开的弹窗/页签内，且未声明标准开合控件，请手动打开后重试（可给触发按钮补 aria-controls 或 data-pp-trigger）',
+    )
+  } else {
+    // reveal_failed：控件存在但激活后仍未可见（动画异常/嵌套超限）
+    ElMessage.info('自动打开失败，请手动打开所在弹窗/页签后重试')
+  }
 }
 
 /** 反向联动入口：文档「定位」按钮点击。 */
@@ -659,7 +705,7 @@ function locateAnchor(anchorId: string) {
     ready.value = false
     currentEntry.value = targetEntry
   } else {
-    postHighlight({ anchorId })
+    postGoto({ anchorId }).then((res) => gotoToast(res, anchorId))
   }
 }
 

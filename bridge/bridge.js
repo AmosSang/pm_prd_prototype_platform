@@ -7,6 +7,10 @@
  *        + 点击 icon 发 ANCHOR_CLICK（宿主侧滚动右侧文档并高亮 2s）
  * T3.2：反向联动——HIGHLIGHT_ANCHOR（宿主点文档「定位」→ 滚动到锚点元素
  *        + outline 脉冲闪烁 3 次；锚点不在本页时由宿主先切页再发）
+ * GOTO（G1）：GOTO_ANCHOR 揭示流水线——目标在未激活 Tab/未触发弹窗/未展开
+ *        折叠区时，先程序化激活开合控件（aria-controls / data-pp-trigger /
+ *        dialog / details）再滚动闪烁；回 GOTO_ACK {hit, reason, revealed}。
+ *        HIGHLIGHT_ANCHOR 同口径走流水线（老原型无 aria 时行为不退化）。
  * T4.1：评论模式——SET_COMMENT_MODE 开关 + hover 蓝色高亮 + click 捕获拦截
  *        （stopPropagation/preventDefault）+ payload 一次性采集（ELEMENT_SELECTED，
  *        字段表见技术方案 §2.3）+ ROUTE_CHANGE（SPA 路由切换上报：
@@ -454,9 +458,191 @@
   )
   window.addEventListener('resize', hideIcon)
 
+  // ─── 揭示流水线（GOTO_ANCHOR，G1）────────────────────────────
+  // 目标元素处于未激活 Tab / 未触发弹窗 / 未展开折叠区时，定位前先「揭示」：
+  // 向上找第一个隐藏容器 → 找开合控件 → 程序化激活 → 重查可见性（循环）。
+  // 前提是原型遵守规范：开合控件 aria-controls（或 data-pp-trigger 逃生口）
+  // 声明关联、容器常驻 DOM（见《vibe-coding-HTML原型规范-V1.md》）。
+  // 老原型（无 aria）行为不退化：揭示不动就回落到直接闪烁（与旧版一致）。
+
+  /** CSS 属性选择器内转义（id 契约是 kebab-case，兜底引号与反斜杠）。 */
+  function cssEscapeAttr(s) {
+    return String(s).replace(/(["\\])/g, '\\$1')
+  }
+
+  /** 元素是否「已揭示」（可见）。依次查：
+   * 1) 自身/祖先 hidden 属性
+   * 2) 祖先链 display:none / visibility:hidden / opacity<0.05 / content-visibility:hidden
+   * 3) 处于未展开的 <details> 内（标准形态，确定性判定）
+   * 4) offsetParent===null（body/html 与 position:fixed 例外——前者 offsetParent
+   *    恒为 null，不能据此判隐藏）
+   * 5) 零尺寸（宽高均 0）
+   * 6) getClientRects 为空 */
+  function isRevealed(el) {
+    if (!el || el.nodeType !== 1) return false
+    if (el.closest('[hidden]')) return false
+    var det = el.closest('details')
+    if (det && !det.open) return false
+    for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+      var cs = window.getComputedStyle(n)
+      if (cs.display === 'none') return false
+      if (cs.visibility === 'hidden') return false
+      if (cs.contentVisibility === 'hidden') return false
+      if (parseFloat(cs.opacity) < 0.05) return false
+    }
+    if (
+      el !== document.body &&
+      el !== document.documentElement &&
+      el.offsetParent === null &&
+      window.getComputedStyle(el).position !== 'fixed'
+    ) {
+      return false
+    }
+    var r = el.getBoundingClientRect()
+    if (r.width === 0 && r.height === 0) return false
+    if (el.getClientRects().length === 0) return false
+    return true
+  }
+
+  /** 从 el 向上找「最外层」隐藏祖先容器（揭示目标）。
+   * 取最外层而非第一个：目标在 display:none 面板内时，最近的隐藏祖先往往
+   * 是面板里的普通元素（无 id、无触发器）——外层才是 tab 弹窗等可开合容器。
+   * 遍历在 body/html 处止步（它们不是开合容器）。 */
+  function nearestHiddenContainer(el) {
+    var n = el.parentElement
+    var last = null
+    while (n && n.nodeType === 1 && n !== document.body && n !== document.documentElement) {
+      if (isRevealed(n)) break
+      last = n
+      n = n.parentElement
+    }
+    return last
+  }
+
+  /** 找 container 的开合控件并激活。优先级：
+   * 1) 全页 [aria-controls="容器id"] → click
+   * 2) 全页 [data-pp-trigger="容器id"]（非 ARIA 场景逃生口）→ click
+   * 3) 容器是 <dialog> 未 open → showModal()
+   * 4) 容器是 <details> → open=true
+   * 返回 {trigger, method} 或 null。同一 trigger 一次流水线内只激活一次。 */
+  function findTrigger(container, activated) {
+    var id = container.id || ''
+    var trig = null
+    var method = ''
+    if (id) {
+      trig = document.querySelector(
+        '[aria-controls="' + cssEscapeAttr(id) + '"], [data-pp-trigger="' + cssEscapeAttr(id) + '"]',
+      )
+      if (trig) method = trig.hasAttribute('aria-controls') ? 'aria-controls' : 'data-pp-trigger'
+    }
+    if (!trig) {
+      if (container.tagName === 'DIALOG' && !container.open) {
+        try {
+          container.showModal()
+        } catch (e) {
+          try { container.show() } catch (e2) { /* 已 open 等异常忽略 */ }
+        }
+        return { trigger: container, method: 'dialog-showModal' }
+      }
+      if (container.tagName === 'DETAILS' && !container.open) {
+        container.open = true
+        return { trigger: container, method: 'details-open' }
+      }
+      return null
+    }
+    if (activated.indexOf(trig) !== -1) return null // 防重复点击（幂等）
+    activated.push(trig)
+    trig.click()
+    return { trigger: trig, method: method }
+  }
+
+  /** 揭示循环上限（嵌套弹窗 → 内层 Tab 场景 5 层足够）。 */
+  var MAX_GOTO_DEPTH = 5
+
+  /**
+   * 揭示 + 滚动 + 闪烁（GOTO_ANCHOR 主流程）。
+   * @returns {Promise<{hit:boolean, reason:string, revealed:Array}>}
+   */
+  function gotoAnchor(anchorId, cssPath) {
+    var revealed = []
+    // 1. 定位元素（锚点优先，cssPath 兜底——与旧 highlightAnchor 同口径）
+    var el = null
+    if (anchorId) el = document.querySelector('[data-pa="' + cssEscapeAttr(anchorId) + '"]')
+    if (!el && cssPath) el = queryTarget(cssPath)
+    if (!el) return Promise.resolve({ hit: false, reason: 'not_found', revealed: revealed })
+
+    // 2. 揭示循环（异步：每次激活后等 2 帧 + 动画余量再重查）
+    var activated = [] // 已激活的触发器（防重复点击）
+    return gotoStep(el, revealed, activated, 0)
+  }
+
+  /** 揭示循环单步：可见 → 收尾；不可见 → 找容器/触发器激活后异步续跑。 */
+  function gotoStep(el, revealed, activated, depth) {
+    if (isRevealed(el)) return Promise.resolve(finishGoto(el, revealed))
+    if (depth >= MAX_GOTO_DEPTH) {
+      return Promise.resolve({ hit: false, reason: 'reveal_failed', revealed: revealed })
+    }
+    var container = nearestHiddenContainer(el)
+    if (!container && !isRevealed(el)) {
+      // 元素自身隐藏且祖先全可见（浮层典型形态：position:absolute +
+      // 自身 display:none，如技能面板/上传浮层）——隐藏的「容器」就是
+      // 元素自己，用元素 id 找触发器。无 id 的裸元素在 findTrigger
+      // 里自然降级为 no_trigger。
+      container = el
+    }
+    if (!container) {
+      return Promise.resolve({ hit: false, reason: 'reveal_failed', revealed: revealed })
+    }
+    var step
+    try {
+      step = findTrigger(container, activated)
+    } catch (e) {
+      return Promise.resolve({ hit: false, reason: 'reveal_failed', revealed: revealed })
+    }
+    if (!step) return Promise.resolve({ hit: false, reason: 'no_trigger', revealed: revealed })
+    revealed.push({
+      container: container.id || container.tagName.toLowerCase(),
+      method: step.method,
+      trigger: step.trigger ? (step.trigger.id || step.trigger.tagName.toLowerCase()) : '',
+    })
+    // 等待：2 帧 + 350ms 默认动画余量；触发器可标 data-pp-delay 自定义
+    var wait =
+      (step.trigger && parseInt(step.trigger.getAttribute('data-pp-delay'), 10)) || 350
+    return new Promise(function (resolve) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          setTimeout(function () {
+            resolve(gotoStep(el, revealed, activated, depth + 1))
+          }, wait)
+        })
+      })
+    })
+  }
+
+  /** 揭示完成：滚动到视口中部 + 闪烁（原 highlightAnchor 的呈现逻辑）。 */
+  function finishGoto(el, revealed) {
+    ensureHighlightStyle()
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    } catch (e) {
+      el.scrollIntoView()
+    }
+    el.classList.remove(HIGHLIGHT_CLASS)
+    // eslint-disable-next-line no-unused-expressions
+    void el.offsetWidth
+    el.classList.add(HIGHLIGHT_CLASS)
+    clearTimeout(el.__ppFlashTimer)
+    el.__ppFlashTimer = setTimeout(function () {
+      el.classList.remove(HIGHLIGHT_CLASS)
+    }, 1600)
+    return { hit: true, reason: 'ok', revealed: revealed }
+  }
+
   // ─── 反向联动（T3.2）：HIGHLIGHT_ANCHOR ─────────────────────
   // 宿主点文档「定位」按钮 → 本页滚动到锚点元素 + outline 脉冲闪烁 3 次。
   // 锚点不在本页时宿主先切 iframe src（等 READY）再发，本侧无需处理跨页。
+  // G1 升级：HIGHLIGHT_ANCHOR 也走 GOTO 揭示流水线（向后兼容——老原型
+  // 无 aria 时揭示不动，行为与旧版直接闪烁一致）。
   var HIGHLIGHT_CLASS = 'pp-anchor-flash'
   var highlightStyleEl = null
 
@@ -478,28 +664,13 @@
   function highlightAnchor(anchorId, cssPath) {
     // 定位目标：锚点优先，缺省时按 cssPath（T4.4 评论定位——无锚点 dom
     // 评论用采集时的 css_path；page 评论传 'body' 整页闪烁）
+    // G1 起消息入口统一走 gotoAnchor（含揭示）；本函数仅保留同步形态
+    // 供对照，不再被消息分发调用。
     var el = null
-    if (anchorId) el = document.querySelector('[data-pa="' + anchorId + '"]')
+    if (anchorId) el = document.querySelector('[data-pa="' + cssEscapeAttr(anchorId) + '"]')
     if (!el && cssPath) el = queryTarget(cssPath)
     if (!el) return false
-    ensureHighlightStyle()
-    // 滚动到视口中部（平滑），再闪烁
-    try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    } catch (e) {
-      el.scrollIntoView() // 旧浏览器兜底
-    }
-    // 重触发动画：先移除再强制 reflow 再加回
-    el.classList.remove(HIGHLIGHT_CLASS)
-    // eslint-disable-next-line no-unused-expressions
-    void el.offsetWidth
-    el.classList.add(HIGHLIGHT_CLASS)
-    // 动画结束（3 次 × 0.4s = 1.2s，留 200ms 余量）后清理 class
-    clearTimeout(el.__ppFlashTimer)
-    el.__ppFlashTimer = setTimeout(function () {
-      el.classList.remove(HIGHLIGHT_CLASS)
-    }, 1600)
-    return true
+    return finishGoto(el, []).hit
   }
 
   // ─── 评论模式（T4.1）────────────────────────────────────────
@@ -863,11 +1034,26 @@
       send('ELEMENT_SELECTED', { payload: collectPayload(document.body) })
     } else if (msg.type === 'SET_COMMENT_BADGES') {
       setCommentBadges(msg.badges || {})
-    } else if (msg.type === 'HIGHLIGHT_ANCHOR') {
-      // 反向联动（T3.2）/ 评论定位（T4.4）：false 表示本页没找到目标
-      // （锚点或 cssPath 都未命中；万一落空回 ACK 让宿主 toast 提示）
-      var hit = highlightAnchor(msg.anchorId, msg.cssPath)
-      send('HIGHLIGHT_ACK', { anchorId: msg.anchorId, hit: hit })
+    } else if (msg.type === 'HIGHLIGHT_ANCHOR' || msg.type === 'GOTO_ANCHOR') {
+      // 反向联动（T3.2）/ 评论定位（T4.4）/ 揭示流水线（GOTO）：hit=false
+      // 表示未找到或揭示失败（reason 见 gotoAnchor）；旧 HIGHLIGHT_ACK 保持
+      // 原字段不变，GOTO_ANCHOR 回 GOTO_ACK（多 requestId + revealed + reason）
+      var isGoto = msg.type === 'GOTO_ANCHOR'
+      Promise.resolve(
+        gotoAnchor(msg.anchorId, msg.cssPath),
+      ).then(function (res) {
+        if (isGoto) {
+          send('GOTO_ACK', {
+            requestId: msg.requestId,
+            anchorId: msg.anchorId,
+            hit: res.hit,
+            reason: res.reason,
+            revealed: res.revealed,
+          })
+        } else {
+          send('HIGHLIGHT_ACK', { anchorId: msg.anchorId, hit: res.hit })
+        }
+      })
     } else if (msg.type === 'TAKE_SCREENSHOT') {
       var target = msg.cssPath ? queryTarget(msg.cssPath) : null
       // 截图前隐藏平台注入物（锚点 icon / 评论角标）——这些 UI 会进截图
