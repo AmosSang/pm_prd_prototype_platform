@@ -11,6 +11,7 @@ import { currentUser } from '../auth'
 import { PROTO_ORIGIN } from '../proto-origin'
 import CommentBox from '../components/CommentBox.vue'
 import CommentDrawer from '../components/CommentDrawer.vue'
+import TocSidebar, { type TocItem } from '../components/TocSidebar.vue'
 import {
   createComment,
   getOverview,
@@ -916,15 +917,16 @@ md.use(anchorPlugin)
 md.use(mdAnchor, { slugify: zhSlugify })
 md.use(taskLists, { label: true })
 
-/** 中文友好 slug（PRD §5.4.1）：保留中文/字母/数字/连字符，重名由
- * markdown-it-anchor 自动追加序号（-1/-2）。id 与 data-pa 是两套体系
- * （本函数管文档内导航，anchorPlugin 管 PRD↔原型联动），互不干扰。 */
+/** 中文友好 slug（PRD §5.4.1）：保留中文/字母/数字/连字符/点（章节编号
+ * 「1.1.1」语义保留），空白转连字符，重名由 markdown-it-anchor 自动追加
+ * 序号（-1/-2）。id 与 data-pa 是两套体系（本函数管文档内导航，anchorPlugin
+ * 管 PRD↔原型联动），互不干扰。 */
 function zhSlugify(s: string): string {
   const slug = String(s)
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '-')
-    .replace(/[^\p{Script=Han}\w-]+/gu, '')
+    .replace(/[^\p{Script=Han}\w.-]+/gu, '')
   return slug || 'heading'
 }
 
@@ -953,6 +955,43 @@ async function loadDoc(file: string) {
   } finally {
     docLoading.value = false
   }
+  // T10.2：docLoading=false 后 .markdown-body（v-else 分支）才挂载，
+  // 等下一轮渲染完成再提取大纲（此前放在 finally 之前，article 还在
+  // 「加载中」态，.markdown-body 不存在 → 大纲永远为空）
+  await nextTick()
+  extractToc()
+}
+
+// ───────────────────── T10.2 目录大纲（PRD §5.4.3）─────────────────────
+const tocItems = ref<TocItem[]>([])
+const prdScrollEl = ref<HTMLElement | null>(null)
+/** 手动收起偏好（本次会话记忆；split 模式下生效） */
+const tocManuallyCollapsed = ref(false)
+
+/** 从渲染后的 DOM 提取 h1–h4（文本取纯内容，id 由 markdown-it-anchor 生成）。 */
+function extractToc(): void {
+  const root = prdScrollEl.value?.querySelector('.markdown-body')
+  if (!root) {
+    tocItems.value = []
+    return
+  }
+  const heads = root.querySelectorAll('h1, h2, h3, h4')
+  const items: TocItem[] = []
+  heads.forEach((h) => {
+    const id = h.id
+    if (!id) return // 无 id（如手写 HTML 标题）不进大纲
+    items.push({ id, text: (h.textContent || '').trim(), level: Number(h.tagName[1]) })
+  })
+  tocItems.value = items
+}
+
+/** 展开收起规则（PRD §5.4.3 用户确认版）：
+ * 三栏（评论抽屉打开）强制收起；split 模式默认展开、可手动收起。
+ * （整屏强制展开的规则在阶段 11 整屏布局落地时接线。） */
+const tocCollapsed = computed(() => drawerOpen.value || tocManuallyCollapsed.value)
+
+function toggleToc(): void {
+  tocManuallyCollapsed.value = !tocManuallyCollapsed.value
 }
 
 watch(currentDoc, (f) => loadDoc(f))
@@ -1244,34 +1283,53 @@ onBeforeUnmount(() => {
             <el-option v-for="d in overview.docs" :key="d" :label="d" :value="d" />
           </el-select>
           <span v-else-if="overview.docs.length === 1" class="doc-name">{{ currentDoc }}</span>
+          <!-- T10.2 大纲收起/展开（split 模式下可切换；三栏强制收起由 tocCollapsed 驱动） -->
+          <button
+            v-if="tocItems.length"
+            class="toc-toggle"
+            data-testid="toc-toggle"
+            :title="tocCollapsed ? '展开目录' : '收起目录'"
+            @click="toggleToc"
+          >
+            {{ tocCollapsed ? '☰ 目录' : '♮ 收起' }}
+          </button>
           <span class="anchor-count" data-testid="anchor-count" title="bridge 上报的本页锚点数">
             锚点 {{ anchorCount }}
           </span>
         </div>
-        <div
-          class="prd-scroll"
-          :class="{ 'comment-on': commentMode }"
-          @mouseover="onDocMouseover"
-          @mouseout="onDocMouseout"
-          @click="onDocClick"
-        >
-          <p v-if="docLoading" class="empty">加载中…</p>
-          <p v-else-if="!overview.docs.length" class="empty">
-            项目内未发现 markdown 文档（prd/ 目录或根目录 *.md）
-          </p>
-          <!-- eslint-disable-next-line vue/no-v-html -->
-          <article v-else class="markdown-body" data-testid="prd-content" v-html="prdHtml" />
-          <!-- T4.4 文档段落评论数量角标：hover 有评论的段落时出现于右上角 -->
+        <div class="prd-body">
           <div
-            v-if="docBadge.count"
-            ref="docBadgeEl"
-            class="doc-comment-badge"
-            data-testid="doc-comment-badge"
-            title="查看该段落的评论"
-            @click="clickDocBadge"
+            ref="prdScrollEl"
+            class="prd-scroll"
+            :class="{ 'comment-on': commentMode }"
+            @mouseover="onDocMouseover"
+            @mouseout="onDocMouseout"
+            @click="onDocClick"
           >
-            {{ docBadge.count > 99 ? '99+' : docBadge.count }}
+            <p v-if="docLoading" class="empty">加载中…</p>
+            <p v-else-if="!overview.docs.length" class="empty">
+              项目内未发现 markdown 文档（prd/ 目录或根目录 *.md）
+            </p>
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <article v-else class="markdown-body" data-testid="prd-content" v-html="prdHtml" />
+            <!-- T4.4 文档段落评论数量角标：hover 有评论的段落时出现于右上角 -->
+            <div
+              v-if="docBadge.count"
+              ref="docBadgeEl"
+              class="doc-comment-badge"
+              data-testid="doc-comment-badge"
+              title="查看该段落的评论"
+              @click="clickDocBadge"
+            >
+              {{ docBadge.count > 99 ? '99+' : docBadge.count }}
+            </div>
           </div>
+          <!-- T10.2 目录大纲：split 默认展开可收起 / 三栏强制收起（PRD §5.4.3） -->
+          <TocSidebar
+            :items="tocItems"
+            :scroll-el="prdScrollEl"
+            :collapsed="tocCollapsed"
+          />
         </div>
         <!-- T 增强：多锚点区块点击「定位」→ 弹出锚点 ID 列表供选择 -->
         <Teleport to="body">
@@ -1722,12 +1780,41 @@ onBeforeUnmount(() => {
 .divider:hover, .divider.dragging { background: var(--pp-primary-soft); }
 .divider:hover::after, .divider.dragging::after { opacity: 1; }
 
+/* T10.2 大纲栏布局基座：prd-body = 滚动区 + 大纲栏横排 */
+.prd-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
 .prd .prd-scroll {
   flex: 1;
   overflow-y: auto;
   padding: 24px 32px;
   position: relative; /* T4.4 文档段落评论角标的定位基座 */
   background: var(--pp-surface);
+  min-width: 0;
+}
+/* T10.2 大纲收起切换按钮（pane-head 右区）。
+   注意 doc-name/ready 也用 margin-left:auto 推右——toc-toggle 插入中间时
+   flex 的 auto margin 规则：第一个 auto 吃掉全部剩余空间，后续不冲突。 */
+.toc-toggle {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--pp-text-3);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: var(--pp-radius-xs);
+}
+.toc-toggle:hover { background: var(--pp-surface-2); color: var(--pp-text-1); }
+/* T10.2 大纲点击跳转后目标标题短暂高亮 */
+.markdown-body :deep(.toc-jumped) {
+  background: var(--pp-primary-soft);
+  border-radius: 4px;
+  transition: background 0.5s ease;
 }
 
 /* T4.4 文档段落评论数量角标（hover 有评论的段落时右上角） */
