@@ -90,19 +90,21 @@ test('T10.2 大纲全链路：生成 → 点击跳转 → scrollspy → 收起�
   await expect(toc.getByTestId('toc-item-9-附录')).toHaveClass(/active/, { timeout: 3_000 })
 
   // ── 4. 展开收起规则 ──
-  // 4a. split 模式默认展开 → 手动收起 → 列表隐藏但侧栏按钮仍在
+  // 4a. split 模式默认展开 → 手动收起 → 大纲栏整体消失（文档区占满整行）
   await page.getByTestId('toc-toggle').click()
-  await expect(page.getByTestId('toc-list')).toBeHidden()
-  // 4b. 再展开
+  await expect(page.getByTestId('toc-sidebar')).toHaveCount(0)
+  // 4b. 再展开 → 侧栏回来、列表可见
   await page.getByTestId('toc-toggle').click()
+  await expect(page.getByTestId('toc-sidebar')).toBeVisible()
   await expect(page.getByTestId('toc-list')).toBeVisible()
 
   // 4c. 三栏（评论抽屉打开）强制收起：先重新展开再开抽屉
   await page.locator('.v-head').getByTestId('drawer-toggle').click()
-  await expect(page.getByTestId('toc-list')).toBeHidden({ timeout: 3_000 })
+  await expect(page.getByTestId('toc-sidebar')).toHaveCount(0)
   // 关抽屉 → 恢复（回到 split 且手动偏好是展开）
   await page.locator('.v-head').getByTestId('drawer-toggle').click()
-  await expect(page.getByTestId('toc-list')).toBeVisible({ timeout: 3_000 })
+  await expect(page.getByTestId('toc-sidebar')).toBeVisible()
+  await expect(page.getByTestId('toc-list')).toBeVisible()
 
   // ── 5. 无标题文档 → 大纲隐藏 ──
   await page.goto(`/project/${projBare.project_id}`)

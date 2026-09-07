@@ -108,6 +108,19 @@ watch(
   { immediate: true },
 )
 
+// 收起 → 侧栏整体卸载，observer 一并释放；重新展开 → 重建
+watch(
+  () => props.collapsed,
+  (c) => {
+    if (c) {
+      observer?.disconnect()
+      observer = null
+    } else {
+      nextTick(setupSpy)
+    }
+  },
+)
+
 onBeforeUnmount(() => observer?.disconnect())
 
 const hasToc = computed(() => props.items.length > 0)
@@ -115,9 +128,10 @@ defineExpose({ hasToc })
 </script>
 
 <template>
-  <aside v-if="hasToc" class="toc-sidebar" data-testid="toc-sidebar">
+  <!-- 收起时整个侧栏移除（不是 v-show 藏列表）：文档区占满整行宽度 -->
+  <aside v-if="hasToc && !collapsed" class="toc-sidebar" data-testid="toc-sidebar">
     <div class="toc-title">目录</div>
-    <nav v-show="!collapsed" ref="listEl" class="toc-list" data-testid="toc-list">
+    <nav ref="listEl" class="toc-list" data-testid="toc-list">
       <button
         v-for="it in items"
         :key="it.id"

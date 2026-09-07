@@ -985,8 +985,9 @@ function extractToc(): void {
   tocItems.value = items
 }
 
-/** 展开收起规则（PRD §5.4.3 用户确认版）：
- * 三栏（评论抽屉打开）强制收起；split 模式默认展开、可手动收起。
+/** 展开收起规则（PRD §5.4.3 用户确认版 + 2026-09-07 修订）：
+ * 三栏（评论抽屉打开）强制收起；split 模式默认展开、可手动收起；
+ * 收起时大纲栏整体消失（文档区占满整行），不是藏列表留空壳。
  * （整屏强制展开的规则在阶段 11 整屏布局落地时接线。） */
 const tocCollapsed = computed(() => drawerOpen.value || tocManuallyCollapsed.value)
 
