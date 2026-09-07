@@ -101,7 +101,11 @@ test('T10.2 大纲全链路：生成 → 点击跳转 → scrollspy → 收起�
   // 4c. 三栏（评论抽屉打开）强制收起：先重新展开再开抽屉
   await page.locator('.v-head').getByTestId('drawer-toggle').click()
   await expect(page.getByTestId('toc-sidebar')).toHaveCount(0)
-  // 关抽屉 → 恢复（回到 split 且手动偏好是展开）
+  // 4d. 三栏下点「目录」→ toast 说明原因、大纲不出现、手动偏好不被改动
+  await page.getByTestId('toc-toggle').click()
+  await expect(page.getByText('三栏状态下不支持展示目录，请先收起评论栏')).toBeVisible()
+  await expect(page.getByTestId('toc-sidebar')).toHaveCount(0)
+  // 关抽屉 → 恢复（回到 split 且手动偏好仍是展开）
   await page.locator('.v-head').getByTestId('drawer-toggle').click()
   await expect(page.getByTestId('toc-sidebar')).toBeVisible()
   await expect(page.getByTestId('toc-list')).toBeVisible()

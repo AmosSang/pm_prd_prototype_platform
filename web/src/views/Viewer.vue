@@ -991,7 +991,13 @@ function extractToc(): void {
  * （整屏强制展开的规则在阶段 11 整屏布局落地时接线。） */
 const tocCollapsed = computed(() => drawerOpen.value || tocManuallyCollapsed.value)
 
-function toggleToc(): void {
+/** 三栏（评论抽屉打开）时点「目录」→ toast 说明原因，不改手动偏好。
+ * drawerOpen 恢复 split 后大纲按既有偏好自动回来，无需用户再点。 */
+function onTocToggleClick(): void {
+  if (drawerOpen.value) {
+    ElMessage.info('三栏状态下不支持展示目录，请先收起评论栏')
+    return
+  }
   tocManuallyCollapsed.value = !tocManuallyCollapsed.value
 }
 
@@ -1290,7 +1296,7 @@ onBeforeUnmount(() => {
             class="toc-toggle"
             data-testid="toc-toggle"
             :title="tocCollapsed ? '展开目录' : '收起目录'"
-            @click="toggleToc"
+            @click="onTocToggleClick"
           >
             {{ tocCollapsed ? '☰ 目录' : '♮ 收起' }}
           </button>
