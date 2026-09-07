@@ -5,6 +5,7 @@
 > **当前进度：阶段 8 去 Git 本地化改造（T8.1–T8.6）已完成并合 main**；task 卡与设计见《架构调整方案-去Git本地化-V1.md》第 11 节；git 集成代码（gitops.py / git_tasks.py / crypto_util.py）已随 T8.1 移除，评论改直接写项目目录。
 > **T2.1 用户管理增强（已完成）**：`ADMIN_EMAIL` 环境变量启动种子超管（name=admin，is_admin=True）；超管登录后顶栏出「用户管理」入口；`User.disabled` 停用账号（不发验证码、已登录任意 /api/ 调用即 401 强制登出）；用户 CRUD 仅超管可用，禁止停用超管本人；**超管可删除任意项目**。
 > **T 增强（已完成）**：评论移除 priority/scope、状态五态（新增「延后再改」）、批量改状态任意→任意；原型 iframe 放开 allow-same-origin；bridge nonce 跨页持久 + `<head>` 自愈护栏 + Viewer READY 看门狗；`PROTO_ORIGIN` 可配置；启动自初始化（建目录/建表/种子）；`.env` 自动加载。
+> **迭代 V2（阶段 9 进行中）**：项目协作 + MCP Agent 接入 + 整屏展示 + Markdown 渲染大纲。需求见《迭代PRD-V2.md》（仓库外文档），计划见《迭代开发计划-V1.md》。阶段 9 落地「协作者」角色与权限矩阵 V2（§3 硬规则 3/6、§6 权限矩阵 V2）；阶段 12 将落地 MCP 工具契约与 Token 安全规范（§7）。**改造面清单见 §8（T9.1 核对底稿）。**
 
 ## 1 目录结构
 
@@ -48,10 +49,10 @@ platform/
 
 1. **注入不改文件**：bridge.js 只在 HTTP 响应中注入原型 HTML，严禁修改 /data/projects 下项目文件（上传产物保持纯净）
 2. **锚点保护**：既有的 `<!-- pa: xxx -->` 与 `data-pa` 锚点不许删除、不许改名（内容生产与平台共用铁律）
-3. **评论状态流转权限**：状态流转（批量改状态）仅项目创建者可操作；**任意状态 → 任意目标状态**，无硬性状态机限制（五态：待确认/已确认待修改/已修改/忽略/延后再改）；「已确认待修改」是交付修改的标准范围
+3. **评论状态流转权限**：状态流转（批量改状态）仅**管理者**（创建者或协作者）可操作；**任意状态 → 任意目标状态**，无硬性状态机限制（五态：待确认/已确认待修改/已修改/忽略/延后再改）；「已确认待修改」是交付修改的标准范围
 4. **沙箱**：原型 iframe 带 sandbox 属性并含 **allow-same-origin**（业务决策：内部系统不收紧，原型可用 localStorage；生产同域反代 /proto 时与宿主同源）；平台侧 message 监听必须校验 event.origin + nonce
 5. **事实源**：评论以项目目录 reviews/ 为事实源，平台 DB 是展示缓存；评论导出包按 reviews/ 同构组织
-6. **权限**：创建者专属操作（上传原型/PRD、导出评论、可评论开关、删除项目、编辑/删除任意评论、批量改状态）后端逐接口校验，越权一律 403；删除项目创建者或超管均可（T 增强）；「可评论」开关关闭 = 冻结一切写评论操作（浏览不受影响）
+6. **权限（V2 迭代后）**：**管理者专属操作**（上传原型/PRD、导出评论、可评论开关、编辑/删除任意评论、批量改状态）后端逐接口校验，越权一律 403；**管理者 = 创建者 + 协作者**（协作者表 project_members，权限矩阵见 §6）；**仅创建者/超管**：管理协作者、（创建者）删除项目——超管可删任意项目、可管任意项目协作者（T 增强）；「可评论」开关关闭 = 冻结一切写评论操作（浏览与内容上传不受影响）
 7. **上传安全**：原型 zip 解压必须过安全校验（路径穿越/解压总量/条目数/软链），校验通过才原子替换 prototype/，失败保留旧版本
 8. **用户停用**：`User.disabled` 账号不发验证码、已登录会话在任意 /api/ 调用被 401 强制登出；用户增删改（建/改名/停启用）仅超管，禁止停用超管本人；超管由 `ADMIN_EMAIL` 幂等种子
 
@@ -68,7 +69,12 @@ platform/
 
 字段组：元信息（comment_id/author/status/content/created_at）、DOM 定位（target_type/prototype_page/anchor_id/nearest_anchor_id/css_path/outer_html/text_excerpt）、视觉上下文（screenshot/highlight_rect）、交互状态（interaction_state）、文档关联（doc_anchor_id/doc_excerpt/doc_block_fingerprint）。priority/scope 已移除（T 增强）。
 
-status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再改；批量改状态任意→任意，无硬性状态机限制（创建者可操作）。
+status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再改；批量改状态任意→任意，无硬性状态机限制（管理者可操作）。
+
+### 4.4 协作者与 Access Token（迭代 V2 新增）
+
+- **project_members 表**：`project`(FK) / `user`(FK) / `added_by`(FK) / `created_at`，UNIQUE(project, user)；协作者拥有该项目除「管理协作者、删除项目」外的全部创建者权限；创建者本人不入表（天然管理者）
+- **api_tokens 表（阶段 12）**：`user`(FK) / `token_hash`(SHA-256) / `name` / `revoked` / `created_at` / `last_used_at`；Token 格式 `ppp_` + 32 字节随机 hex；**明文仅生成时返回一次，不落库、不进日志**（有单测断言）；`Authorization: Bearer ppp_xxx` 与 session 双轨认证，Bearer 仅对 /api/ 生效；权限 = 绑定用户的网页端权限（含协作者判定）；撤销即时生效；单 token 限流 60 次/分钟
 
 ### 4.3 项目目录约定（/data/projects/{project_id}/）
 
@@ -93,8 +99,58 @@ status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再�
 - **Viewer**：READY 看门狗（8s 未就绪自动重载 iframe ≤3 次，仍失败给「点击重试」）；`PROTO_ORIGIN` 来自 `web/src/proto-origin.ts`（`VITE_PROTO_ORIGIN` > 开发 :8081 > 生产同源）
 - **测试**：契约测试 fixture 放 tests/fixtures/；E2E 断言以任务卡预定义为准，不自由发挥
 
-## 6 分支纪律
+## 6 权限矩阵 V2（迭代 V2，T9.1 单测逐格断言）
 
-- 每张任务卡一个分支：t{阶段}.{序号}-{短名}，如 t8.1-model-storage
-- commit message 格式：`[T8.1] 数据模型与目录基建：去 git 字段 + creator + PROJECTS_DIR`
+| 操作 | 创建者 | 协作者 | 超管 | 普通用户 |
+|------|--------|--------|------|---------|
+| 浏览项目（查看器/对账/评论/截图） | ✓ | ✓ | ✓ | ✓ |
+| 创建项目（成为创建者） | ✓ | ✓ | ✓ | ✓ |
+| 上传原型 zip / 上传 PRD | ✓ | ✓ | ✗ | ✗ |
+| 导出评论 zip | ✓ | ✓ | ✗ | ✗ |
+| 「可评论」开关 | ✓ | ✓ | ✗ | ✗ |
+| 编辑/删除任意评论 | ✓ | ✓ | ✗ | ✗ |
+| 评论状态流转（批量改状态） | ✓ | ✓ | ✗ | ✗ |
+| 编辑/删除自己的评论（限待确认/已确认态） | ✓ | ✓ | ✓ | ✓ |
+| 管理协作者（增/删） | ✓ | ✗ | ✓ | ✗ |
+| 删除项目 | ✓ | ✗ | ✓（任意项目） | ✗ |
+| MCP 操作（阶段 12） | Token 权限 = 绑定用户在上表中的权限 | | | |
+
+细则：超管不参与内容生产（不上传/不导出/不管评论状态），仅治理动作（用户管理、删项目、管协作者）；被移除协作者的下一次写操作即 403（逐请求校验）；协作者账号停用 → 401 强制登出；项目删除 → project_members 级联删除。
+
+## 7 MCP 工具契约（阶段 12 实施依据，本阶段只做设计冻结）
+
+- 7 个工具：`list_projects` / `get_project_overview` / `get_all_comments` / `get_prd_content` / `get_reconcile`（读，登录用户）+ `upload_prototype` / `upload_prd`（写，管理者）
+- `project` 参数：slug 精确 > 名称精确 > 名称包含；多命中返回候选列表，不猜测
+- 返回一律结构化 JSON；错误统一 `{error_code, message, hint}` 三段式
+- `get_all_comments` 返回与 reviews/comments/*.json 及导出包同构（一份契约三处复用）；截图 PNG 不入返回，screenshot 保留相对路径
+- FastMCP 进程回环调 Flask API（不直连 DB）；上传复用 Flask 安全校验全链路；MCP Server instructions 含平台概念速览与意图映射
+- 上传即覆盖旧版本——工具描述必须明示，Agent 应向用户复述确认
+
+## 8 阶段 9 改造面清单（T9.1 核对底稿，grep 核实于 2026-09-07）
+
+后端（`creator_id` 引用全量）：
+
+| 位置 | 现状 | 改造 |
+|------|------|------|
+| server/projects.py:139 `_require_creator` | 上传原型/PRD、导出评论等 4 处调用（L117 commentable 开关 / L240 / L292 / reviews.py:615 导出） | 改名 `_require_manager`：uid == creator_id **或** project_members 命中 |
+| server/projects.py:144 `_require_admin_or_creator` | 删除项目 | 不动（协作者不许删） |
+| server/reviews.py:487 / 528 | edit/delete_comment 内联 `is_creator`（编辑/删除任意评论） | 扩为 `is_manager` 判定 |
+| server/reviews.py:570 | batch_status 内联 `uid != creator_id` 跳过 | 扩为管理者判定 |
+| server/projects.py:67 `_project_public` | 返回 `is_creator` | 增 `is_manager` / `member_count`（is_creator 保留） |
+
+前端（`is_creator` 引用全量）：
+
+| 位置 | 改造 |
+|------|------|
+| web/src/projects.ts:16 | Project 类型增 `is_manager`/`member_count`（is_creator 保留） |
+| web/src/views/Viewer.vue:957（可评论开关）/ 990（创建者工具区：上传+导出） | 显隐条件改 `is_manager` |
+| web/src/views/Viewer.vue:1198 | CommentDrawer 传参改 `is_manager`（任意评论管理/状态流转） |
+| web/src/views/Home.vue:191 | 卡片 owner-actions：上传等入口无（本就不在卡片），角标增「协作者」 |
+
+新表与新文件：server/models.py 增 `ProjectMember`（含迁移）；members API 三条（GET 管理者 / POST·DELETE 创建者或超管）；前端协作者管理弹窗（仅创建者/超管可见入口）。
+
+## 9 分支纪律
+
+- 每张任务卡一个分支：t{阶段}.{序号}-{短名}，如 t9.1-collab-backend
+- commit message 格式：`[T9.1] 协作后端：ProjectMember 表 + _require_manager + members API`
 - main 始终全绿可演示，验收通过才合回
