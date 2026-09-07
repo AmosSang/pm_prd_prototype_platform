@@ -32,7 +32,7 @@ import peewee
 from flask import Blueprint, jsonify, request, send_file, session
 
 from server.models import Comment, Project, utcnow_str
-from server.projects import _list_md_files, _repo_root, _require_creator
+from server.projects import _is_manager, _list_md_files, _repo_root, _require_manager
 from server.reconcile import extract_prd_anchors
 from server.shots import SHOTS_DIR
 
@@ -482,12 +482,11 @@ def edit_comment(cid: str):
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法编辑"), 400
-    # T8.4 权限收口（§6）：创建者编辑任意评论不受状态限制；作者限自己的
-    # 评论且仅待确认/已确认待修改态。
-    is_creator = session.get("uid") == c.project.creator_id
-    if not is_creator:
+    # T9.1 权限矩阵 V2：管理者（创建者/协作者）编辑任意评论不受状态限制；
+    # 作者限自己的评论且仅待确认/已确认待修改态。
+    if not _is_manager(c.project, session.get("uid")):
         if c.author_email != session.get("email"):
-            return jsonify(code=403, msg="仅评论作者或项目创建者可编辑"), 403
+            return jsonify(code=403, msg="仅评论作者或项目管理者可编辑"), 403
         if c.status not in EDITABLE_STATUSES:
             return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
 
@@ -523,12 +522,11 @@ def delete_comment(cid: str):
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法删除"), 400
-    # T8.4 权限收口（§6）：创建者删除任意评论不受状态限制；作者限自己的
-    # 评论且仅待确认/已确认待修改态。
-    is_creator = session.get("uid") == c.project.creator_id
-    if not is_creator:
+    # T9.1 权限矩阵 V2：管理者（创建者/协作者）删除任意评论不受状态限制；
+    # 作者限自己的评论且仅待确认/已确认待修改态。
+    if not _is_manager(c.project, session.get("uid")):
         if c.author_email != session.get("email"):
-            return jsonify(code=403, msg="仅评论作者或项目创建者可删除"), 403
+            return jsonify(code=403, msg="仅评论作者或项目管理者可删除"), 403
         if c.status not in EDITABLE_STATUSES:
             return jsonify(code=400, msg=f"「{c.status}」状态的评论不可删除"), 400
 
@@ -566,9 +564,10 @@ def batch_status():
         if not c:
             skipped.append({"comment_id": str(cid), "reason": "不存在"})
             continue
-        # 权限收口（§6）：状态流转仅创建者可操作；且批量条目须属创建者项目
-        if session.get("uid") != c.project.creator_id:
-            skipped.append({"comment_id": c.comment_id, "reason": "仅项目创建者可操作状态"})
+        # T9.1 权限矩阵 V2：状态流转仅管理者（创建者/协作者）可操作；
+        # 且批量条目须属该管理者项目
+        if not _is_manager(c.project, session.get("uid")):
+            skipped.append({"comment_id": c.comment_id, "reason": "仅项目管理者可操作状态"})
             continue
         if not c.project.commentable:
             skipped.append({"comment_id": c.comment_id, "reason": "项目已关闭评论"})
@@ -612,7 +611,7 @@ def export_comments(pid: int):
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return jsonify(code=404, msg="项目不存在"), 404
-    deny = _require_creator(p)
+    deny = _require_manager(p)
     if deny:
         return deny
 

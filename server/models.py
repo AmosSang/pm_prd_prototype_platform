@@ -81,6 +81,22 @@ class Project(BaseModel):
     created_at = peewee.CharField(default=utcnow_str)
 
 
+class ProjectMember(BaseModel):
+    """项目协作者（迭代 V2 / T9.1，PRD §5.1）。
+
+    协作者拥有该项目除「管理协作者、删除项目」外的全部创建者权限
+    （上传/导出/可评论开关/任意评论管理/状态流转）。创建者本人不入表
+    （天然管理者）；UNIQUE(project, user) 防重复添加；项目删除时随
+    delete_project 级联清理。
+    """
+
+    project = peewee.ForeignKeyField(Project, backref="members", null=False)
+    user = peewee.ForeignKeyField(User, backref="memberships", null=False)
+    # 添加人（创建者或超管，审计展示用）
+    added_by = peewee.IntegerField(null=False)
+    created_at = peewee.CharField(default=utcnow_str)
+
+
 class Comment(BaseModel):
     """评论（T4.2，展示缓存；事实源为项目目录 reviews/comments/*.json）。
 
@@ -117,7 +133,7 @@ def init_tables() -> None:
     os.makedirs(PROJECTS_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "shots"), exist_ok=True)
     db.connect(reuse_if_open=True)
-    db.create_tables([User, VerificationCode, Project, Comment], safe=True)
+    db.create_tables([User, VerificationCode, Project, ProjectMember, Comment], safe=True)
     _migrate()
     seed_admin()
 

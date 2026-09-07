@@ -29,7 +29,7 @@ from server.config import (
     PROTO_UNZIP_MAX_FILES,
     PROTO_ZIP_MAX_BYTES,
 )
-from server.models import Comment, Project, User, utcnow_str
+from server.models import Comment, Project, ProjectMember, User, utcnow_str
 from server.page_map import parse_repo_page_map, scan_proto_anchors
 from server.reconcile import reconcile_repo
 from server.storage import delete_project_dirs, ensure_project_dirs, project_root
@@ -56,15 +56,36 @@ def _creator_public(creator_id: int) -> dict:
     return {"id": u.id, "name": u.name, "email": u.email}
 
 
+def _is_member(project_id: int, uid: int) -> bool:
+    """uid 是否为项目协作者（T9.1）。"""
+    return (
+        ProjectMember.select()
+        .where(ProjectMember.project == project_id, ProjectMember.user == uid)
+        .exists()
+    )
+
+
+def _is_manager(p: Project, uid: int | None) -> bool:
+    """管理者判定（T9.1 权限矩阵 V2）：创建者或协作者。"""
+    if uid is None:
+        return False
+    return uid == p.creator_id or _is_member(p.id, uid)
+
+
 def _project_public(p: Project) -> dict:
-    """列表/详情对外字段（含创建者与 is_creator 标记）。"""
+    """列表/详情对外字段（含创建者、is_creator/is_manager 标记与协作者数）。"""
     uid = session.get("uid")
+    member_count = (
+        ProjectMember.select().where(ProjectMember.project == p.id).count()
+    )
     return {
         "id": p.id,
         "project_id": p.project_id,
         "name": p.name,
         "creator": _creator_public(p.creator_id),
         "is_creator": uid is not None and uid == p.creator_id,
+        "is_manager": _is_manager(p, uid),
+        "member_count": member_count,
         "commentable": p.commentable,
         "content_updated_at": p.content_updated_at,
         "created_at": p.created_at,
@@ -106,15 +127,15 @@ def list_projects():
 
 @bp.patch("/<int:pid>")
 def update_project(pid: int):
-    """项目设置更新（T4.5 / T8.4 收权）：commentable 可评论开关，仅创建者。
+    """项目设置更新（T4.5 / T9.1 收权扩围）：commentable 可评论开关，仅管理者。
 
     产品方案 §4.5：默认开启；关闭后全员评论入口置灰、一切写评论操作
-    被拦截（已有评论仍可查看）。T8.4 起仅项目创建者可开关（§6 权限矩阵）。
+    被拦截（已有评论仍可查看）。T9.1 起创建者与协作者均可开关（权限矩阵 V2）。
     """
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
-    deny = _require_creator(p)
+    deny = _require_manager(p)
     if deny:
         return deny
 
@@ -133,16 +154,24 @@ def update_project(pid: int):
 # ───────────────────── 内容上传（T8.1 最小版；T8.2 补前端 UI 与部署层限额）─────────────────────
 
 
-def _require_creator(p: Project):
-    """创建者专属校验（AGENTS.md 硬规则 6：上传原型/PRD 仅创建者）。"""
+def _require_manager(p: Project):
+    """管理者校验（T9.1 权限矩阵 V2：创建者或协作者）。
+
+    覆盖：可评论开关、上传原型/PRD、导出评论、编辑/删除任意评论、
+    批量改状态（AGENTS.md 硬规则 6）。
+    """
     uid = session.get("uid")
-    if not uid or uid != p.creator_id:
-        return _err("仅项目创建者可上传内容", 403)
+    if not uid or not _is_manager(p, uid):
+        return _err("仅项目创建者或协作者可执行此操作", 403)
     return None
 
 
 def _require_admin_or_creator(p: Project):
-    """删除权限（T 增强）：项目创建者 或 超级管理员 可删任意项目。"""
+    """删除权限（T 增强，维持不变）：项目创建者 或 超级管理员 可删任意项目。
+
+    T9.1 权限矩阵 V2：协作者不可删项目；此函数同时作为协作者管理的
+    权限门槛（创建者或超管可增删协作者）。
+    """
     uid = session.get("uid")
     if not uid:
         return _err("未登录", 401)
@@ -151,7 +180,7 @@ def _require_admin_or_creator(p: Project):
     u = User.get_or_none(User.id == uid)
     if u is not None and u.is_admin:
         return None
-    return _err("仅项目创建者或超级管理员可删除", 403)
+    return _err("仅项目创建者或超级管理员可执行此操作", 403)
 
 
 def _is_junk_entry(name: str) -> bool:
@@ -237,7 +266,7 @@ def upload_prototype(pid: int):
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
-    deny = _require_creator(p)
+    deny = _require_manager(p)
     if deny:
         return deny
 
@@ -289,7 +318,7 @@ def upload_prd(pid: int):
     p = Project.get_or_none(Project.id == pid)
     if not p:
         return _err("项目不存在", 404)
-    deny = _require_creator(p)
+    deny = _require_manager(p)
     if deny:
         return deny
 
@@ -338,8 +367,94 @@ def delete_project(pid: int):
 
     delete_project_dirs(p.project_id)
     Comment.delete().where(Comment.project == p.id).execute()
+    # T9.1：协作者关系随项目级联删除（权限矩阵 V2 §6 细则）
+    ProjectMember.delete().where(ProjectMember.project == p.id).execute()
     p.delete_instance()
     return jsonify(code=0, data={"deleted": True, "project_id": p.project_id}), 200
+
+
+# ───────────────────────── T9.1 项目协作者（PRD §5.1）─────────────────────────
+
+
+def _member_public(m: ProjectMember) -> dict:
+    """协作者列表项：姓名、邮箱、添加人、添加时间。
+
+    注意：peewee FK 字段属性访问（m.user）返回关联 Model 实例而非
+    主键值，用 m.user_id 取 int（peewee 自动生成 <fk>_id 属性）。
+    """
+    u = User.get_or_none(User.id == m.user_id)
+    return {
+        "user_id": m.user_id,
+        "name": u.name if u else "（已删除用户）",
+        "email": u.email if u else "",
+        "added_by": _creator_public(m.added_by).get("name", ""),
+        "created_at": m.created_at,
+    }
+
+
+@bp.get("/<int:pid>/members")
+def list_members(pid: int):
+    """协作者列表（T9.1）：管理者（创建者/协作者）可看。
+
+    权限矩阵 V2 §6.1：GET 放宽到管理者（协作者需要知道同项目还有谁），
+    增删保持创建者/超管。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    deny = _require_manager(p)
+    if deny:
+        return deny
+    rows = ProjectMember.select().where(ProjectMember.project == p.id).order_by(ProjectMember.id)
+    return jsonify(code=0, data=[_member_public(m) for m in rows]), 200
+
+
+@bp.post("/<int:pid>/members")
+def add_member(pid: int):
+    """添加协作者（T9.1）：仅创建者或超管；入参 {email}，从既有用户表匹配。
+
+    重复添加 → 400 提示「已是协作者」；用户表不存在该邮箱 → 404；
+    创建者本人不可添加（天然管理者）。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    deny = _require_admin_or_creator(p)
+    if deny:
+        return deny
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip()
+    if not email:
+        return _err("email 必填", 400)
+    u = User.get_or_none(User.email == email)
+    if not u:
+        return _err(f"用户表中不存在 {email}（先由超管在用户管理中添加）", 404)
+    if u.id == p.creator_id:
+        return _err("创建者本人天然拥有全部权限，无需添加", 400)
+    if u.disabled:
+        return _err("该账号已停用，请先启用", 400)
+    if _is_member(p.id, u.id):
+        return _err(f"{u.name} 已是本项目协作者", 400)
+
+    m = ProjectMember.create(project=p.id, user=u.id, added_by=session.get("uid"))
+    return jsonify(code=0, data=_member_public(m)), 200
+
+
+@bp.delete("/<int:pid>/members/<int:uid>")
+def remove_member(pid: int, uid: int):
+    """移除协作者（T9.1）：仅创建者或超管。移除后该用户下一次写操作即 403。"""
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    deny = _require_admin_or_creator(p)
+    if deny:
+        return deny
+    m = ProjectMember.get_or_none(ProjectMember.project == p.id, ProjectMember.user == uid)
+    if not m:
+        return _err("该用户不是本项目协作者", 404)
+    m.delete_instance()
+    return jsonify(code=0, data={"removed": True, "user_id": uid}), 200
 
 
 # ───────────────────────── T2.4 查看器数据 ─────────────────────────

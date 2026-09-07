@@ -533,8 +533,8 @@ class TestBatchStatus:
         }).status_code == 400
 
     def test_batch_creator_only(self, app, project):
-        """T8.4 收权（§6）：状态流转仅创建者可操作——非创建者调用，
-        每条都跳过并报「仅项目创建者可操作状态」。"""
+        """T9.1 权限矩阵 V2：状态流转仅管理者（创建者/协作者）——非管理者
+        调用，每条都跳过并报「仅项目管理者可操作状态」。"""
         client, p = project
         c1 = _submit_simple(client, p)
         with client.session_transaction() as sess:
@@ -544,7 +544,7 @@ class TestBatchStatus:
         resp = client.post("/api/comments/batch-status", json={"cids": [c1], "status": "已确认待修改"})
         data = resp.get_json()["data"]
         assert data["updated"] == []
-        assert data["skipped"][0]["reason"] == "仅项目创建者可操作状态"
+        assert data["skipped"][0]["reason"] == "仅项目管理者可操作状态"
         # 状态未变
         assert Comment.get(Comment.comment_id == c1).status == "待确认"
 
