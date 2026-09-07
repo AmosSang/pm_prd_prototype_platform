@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js'
+import mdAnchor from 'markdown-it-anchor'
+import taskLists from 'markdown-it-task-lists'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -904,8 +907,42 @@ function openDocComment(host: Element) {
   }
 }
 
-const md = new MarkdownIt({ html: true, linkify: true })
+// ───────────────────── T10.1 Markdown 渲染增强（PRD §5.4）─────────────────────
+// 内核仍是 markdown-it + anchorPlugin（T3.1 契约零改动）；叠加四件套：
+// markdown-it-anchor（标题 id，供大纲跳转）/ highlight.js（代码高亮）/
+// markdown-it-task-lists（task list）/ github-markdown-css（视觉，style 区引入）
+const md = new MarkdownIt({ html: true, linkify: true, highlight })
 md.use(anchorPlugin)
+md.use(mdAnchor, { slugify: zhSlugify })
+md.use(taskLists, { label: true })
+
+/** 中文友好 slug（PRD §5.4.1）：保留中文/字母/数字/连字符，重名由
+ * markdown-it-anchor 自动追加序号（-1/-2）。id 与 data-pa 是两套体系
+ * （本函数管文档内导航，anchorPlugin 管 PRD↔原型联动），互不干扰。 */
+function zhSlugify(s: string): string {
+  const slug = String(s)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{Script=Han}\w-]+/gu, '')
+  return slug || 'heading'
+}
+
+/** highlight.js 高亮：无语言标注时自动探测；失败回退转义原文。 */
+function highlight(code: string, lang: string): string {
+  if (lang && hljs.getLanguage(lang)) {
+    try {
+      return hljs.highlight(code, { language: lang }).value
+    } catch {
+      /* 落到转义兜底 */
+    }
+  }
+  try {
+    return hljs.highlightAuto(code).value
+  } catch {
+    return '' // markdown-it 会用 md.utils.escapeHtml 兜底（返回空即走默认）
+  }
+}
 
 async function loadDoc(file: string) {
   if (!file || !overview.value) return
@@ -1714,49 +1751,27 @@ onBeforeUnmount(() => {
 .doc-comment-badge:hover { background: #c93a3f; }
 .prd .empty { color: var(--pp-text-3); }
 
+/* ── T10.1 Markdown 渲染基线：github-markdown-css ──
+ * 视觉基线整体交给 github-markdown-light（main.ts 全局引入）；
+ * 此处仅保留平台定制层：栏宽适配、链接主色、代码字体、宽表横滚。
+ * 注意 github-markdown-css 的类名恰为 .markdown-body，与既有 DOM 直接兼容；
+ * :deep() 包裹因为 v-html 内容非 scoped 编译目标。 */
 .markdown-body {
   user-select: text;
+  /* 平台定制：字号适配分屏栏宽（PRD §5.4.2 建议 14–15px） */
   font-size: 14px;
-  line-height: 1.75;
-  color: var(--pp-text-1);
-  max-width: 820px;
 }
-.markdown-body h1 {
-  font-size: 22px;
-  border-bottom: 1px solid var(--pp-border);
-  padding-bottom: 10px;
-  margin: 0 0 16px;
-}
-.markdown-body h2 { font-size: 18px; margin-top: 28px; font-weight: 600; }
-.markdown-body h3 { font-size: 15px; margin-top: 22px; font-weight: 600; }
-.markdown-body table { border-collapse: collapse; margin: 12px 0; }
-.markdown-body th, .markdown-body td {
-  border: 1px solid var(--pp-border);
-  padding: 7px 12px;
-  font-size: 13px;
-}
-.markdown-body th { background: var(--pp-surface-2); font-weight: 600; }
-.markdown-body code {
-  background: var(--pp-surface-2);
-  padding: 2px 5px;
-  border-radius: 4px;
-  font-size: 12.5px;
+.markdown-body :deep(a) { color: var(--pp-primary); }
+.markdown-body :deep(code),
+.markdown-body :deep(pre) {
   font-family: var(--pp-mono);
+  font-size: 12.5px;
 }
-.markdown-body pre {
-  background: var(--pp-surface-2);
-  padding: 14px;
-  border-radius: var(--pp-radius-sm);
-  overflow-x: auto;
-}
-.markdown-body blockquote {
-  border-left: 3px solid var(--pp-primary-soft-2);
-  margin: 12px 0;
-  padding: 4px 16px;
-  color: var(--pp-text-2);
-  background: var(--pp-primary-soft);
-  border-radius: 0 var(--pp-radius-xs) var(--pp-radius-xs) 0;
-}
+/* 宽表横向滚动：github-markdown-css 自带 overflow-auto，这里保证容器不撑破分屏 */
+.markdown-body :deep(table) { display: block; max-width: 100%; overflow-x: auto; }
+/* 长链接/长代码串折行，避免溢出（PRD §5.4.2） */
+.markdown-body :deep(p),
+.markdown-body :deep(li) { overflow-wrap: anywhere; }
 /* T3.1 正向联动高亮（点原型锚点 icon 后 2s） */
 .markdown-body :deep(.anchor-highlight) {
   background: #fff3d6;
