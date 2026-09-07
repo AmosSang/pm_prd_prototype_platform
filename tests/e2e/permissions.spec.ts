@@ -105,7 +105,7 @@ test('T8.4 双用户权限：创建者可见专属按钮，普通用户不可见
     data: { cids: [cid], status: '已确认待修改' },
   })
   expect(st.status()).toBe(200)
-  expect((await st.json()).data.skipped[0].reason).toBe('仅项目创建者可操作状态')
+  expect((await st.json()).data.skipped[0].reason).toBe('仅项目管理者可操作状态')
 
   await ctx2.close()
 })

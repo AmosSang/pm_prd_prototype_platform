@@ -181,18 +181,36 @@ onMounted(async () => {
         <div class="card-head">
           <h2>{{ p.name }}</h2>
         </div>
-        <p class="meta">{{ p.project_id }} · 创建者 {{ p.creator.name }}</p>
+        <p class="meta">
+          {{ p.project_id }} · 创建者 {{ p.creator.name }}
+          <!-- T9.1：协作者角标（创建者本人不显示） -->
+          <span
+            v-if="p.is_manager && !p.is_creator"
+            class="member-badge"
+            :data-testid="`member-badge-${p.project_id}`"
+          >
+            协作者
+          </span>
+          <span
+            v-else-if="p.member_count > 0"
+            class="member-count"
+            :title="`共 ${p.member_count} 名协作者`"
+          >
+            +{{ p.member_count }} 协作
+          </span>
+        </p>
         <p v-if="p.content_updated_at" class="meta">内容更新于 {{ p.content_updated_at.slice(0, 10) }}</p>
         <div class="card-actions">
           <router-link class="open" :to="`/project/${p.project_id}`" data-testid="open-project">
             打开分屏查看器 →
           </router-link>
-          <!-- T 增强：上传仅创建者；删除 创建者/超管 均可 -->
-          <span v-if="p.is_creator" class="owner-actions">
+          <!-- T9.1 权限矩阵 V2：上传 管理者（创建者/协作者）；删除 创建者/超管 -->
+          <span v-if="p.is_manager" class="owner-actions">
             <el-button size="small" :data-testid="`upload-${p.project_id}`" @click="openUpload(p)">
               上传内容
             </el-button>
             <el-button
+              v-if="p.is_creator"
               size="small"
               type="danger"
               plain
@@ -339,6 +357,22 @@ onMounted(async () => {
 }
 .card-head h2 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
 .card .meta { color: var(--pp-text-3); font-size: 12px; margin: 0 0 6px; }
+/* T9.1 协作者标识 */
+.member-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--pp-primary, #3b82f6);
+  background: var(--pp-primary-soft, rgba(59, 130, 246, 0.1));
+}
+.member-count {
+  margin-left: 6px;
+  color: var(--pp-text-3);
+  font-size: 11px;
+}
 .card .err { color: var(--pp-danger); font-size: 12px; }
 .card-actions {
   display: flex;

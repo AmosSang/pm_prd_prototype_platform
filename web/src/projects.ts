@@ -14,8 +14,21 @@ export interface ProjectInfo {
   name: string
   creator: Creator
   is_creator: boolean
+  /** T9.1 权限矩阵 V2：管理者 = 创建者或协作者（上传/导出/开关/评论管理/状态流转） */
+  is_manager: boolean
+  /** 协作者数量（不含创建者） */
+  member_count: number
   commentable: boolean
   content_updated_at: string | null
+  created_at: string
+}
+
+/** 协作者列表项（T9.1）：GET /api/projects/{id}/members */
+export interface ProjectMemberInfo {
+  user_id: number
+  name: string
+  email: string
+  added_by: string
   created_at: string
 }
 
@@ -119,9 +132,26 @@ export function uploadPrd(id: number, file: File): Promise<ProjectInfo> {
   return api.upload<ProjectInfo>(`/api/projects/${id}/prd`, fd)
 }
 
-/** 删除项目（目录 + 评论 + DB；仅创建者）。 */
+/** 删除项目（目录 + 评论 + DB；仅创建者/超管）。 */
 export function deleteProject(id: number): Promise<{ deleted: boolean; project_id: string }> {
   return api.delete(`/api/projects/${id}`)
+}
+
+// ───────────────────── 项目协作者（T9.1，创建者/超管专属管理）─────────────────────
+
+/** 协作者列表（管理者可见）。 */
+export function listMembers(id: number): Promise<ProjectMemberInfo[]> {
+  return api.get<ProjectMemberInfo[]>(`/api/projects/${id}/members`)
+}
+
+/** 添加协作者（仅创建者/超管）：从既有用户表按邮箱加人。 */
+export function addMember(id: number, email: string): Promise<ProjectMemberInfo> {
+  return api.post<ProjectMemberInfo>(`/api/projects/${id}/members`, { email })
+}
+
+/** 移除协作者（仅创建者/超管）。 */
+export function removeMember(id: number, userId: number): Promise<{ removed: boolean }> {
+  return api.delete(`/api/projects/${id}/members/${userId}`)
 }
 
 // ───────────────────────── 评论（T4.2）─────────────────────────

@@ -2,7 +2,7 @@
 import MarkdownIt from 'markdown-it'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { anchorPlugin } from '../anchor-plugin'
 import { currentUser } from '../auth'
 import { PROTO_ORIGIN } from '../proto-origin'
@@ -14,6 +14,9 @@ import {
   getPrd,
   getReconcile,
   listComments,
+  listMembers,
+  addMember,
+  removeMember,
   listProjects,
   updateProject,
   uploadPrototype,
@@ -23,6 +26,7 @@ import {
   type CommentPayload,
   type CreateCommentResult,
   type HighlightRect,
+  type ProjectMemberInfo,
   type ProjectOverview,
   type ReconcileDetail,
 } from '../projects'
@@ -218,6 +222,81 @@ async function onPrdPicked(e: Event) {
   } finally {
     uploading.value = false
     if (prdInput.value) prdInput.value.value = ''
+  }
+}
+
+// ───────────────────── T9.1 协作者管理（仅创建者/超管，PRD §5.1） ─────────────────────
+const collabVisible = ref(false)
+const collabLoading = ref(false)
+const members = ref<ProjectMemberInfo[]>([])
+const collabEmail = ref('')
+const collabAdding = ref(false)
+
+/** 管理协作者入口显隐：创建者或超管（权限矩阵 V2 §6.1）。 */
+const canManageMembers = computed(
+  () =>
+    !!overview.value &&
+    (overview.value.project.is_creator || !!currentUser.value?.is_admin),
+)
+
+async function openCollab() {
+  collabVisible.value = true
+  collabEmail.value = ''
+  await refreshMembers()
+}
+
+async function refreshMembers() {
+  const id = overview.value?.project.id
+  if (!id) return
+  collabLoading.value = true
+  try {
+    members.value = await listMembers(id)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '协作者列表加载失败')
+  } finally {
+    collabLoading.value = false
+  }
+}
+
+/** 添加协作者：输入邮箱精确匹配用户表（回车/按钮触发）。 */
+async function onAddMember() {
+  const id = overview.value?.project.id
+  const email = collabEmail.value.trim()
+  if (!id || !email || collabAdding.value) return
+  collabAdding.value = true
+  try {
+    const m = await addMember(id, email)
+    ElMessage.success(`已添加协作者「${m.name}」`)
+    collabEmail.value = ''
+    await refreshMembers()
+    await reloadOverview() // member_count / is_manager 刷新
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '添加失败')
+  } finally {
+    collabAdding.value = false
+  }
+}
+
+/** 移除协作者（二次确认）。 */
+async function onRemoveMember(m: ProjectMemberInfo) {
+  const id = overview.value?.project.id
+  if (!id) return
+  try {
+    await ElMessageBox.confirm(
+      `确定移除协作者「${m.name}（${m.email}）」？移除后其将立即失去本项目管理权限。`,
+      '移除协作者',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 取消
+  }
+  try {
+    await removeMember(id, m.user_id)
+    ElMessage.success(`已移除「${m.name}」`)
+    await refreshMembers()
+    await reloadOverview()
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '移除失败')
   }
 }
 
@@ -950,11 +1029,11 @@ onBeforeUnmount(() => {
       <router-link to="/" class="back">← 项目列表</router-link>
       <strong>{{ overview.project.name }}</strong>
       <span class="meta">{{ slug }} · 创建者 {{ overview.project.creator.name }}</span>
-      <!-- T4.5 项目级「可评论」开关（T8.4 收权：仅创建者可见可操作）：
+      <!-- T4.5 项目级「可评论」开关（T9.1 权限矩阵 V2：管理者=创建者/协作者可见可操作）：
            关闭后全员评论入口置灰（已有评论可查看）。PM 驱动 Agent 修改前关闭，
            同步刷新后再开启（消除 reviews/ 双写窗口） -->
       <span
-        v-if="overview.project.is_creator"
+        v-if="overview.project.is_manager"
         class="comment-toggle"
         title="项目级开关：关闭后全员无法新增评论（已有评论仍可查看）；驱动 Agent 修改前建议关闭"
       >
@@ -986,10 +1065,21 @@ onBeforeUnmount(() => {
       >
         评论 {{ comments.length }}
       </button>
-      <!-- T8.3/T8.2 创建者工具区（仅创建者）：上传原型/PRD + 导出评论（交付范围下拉） -->
-      <el-dropdown v-if="overview.project.is_creator" @command="onCreatorTool">
+      <!-- T9.1 协作者管理入口（仅创建者/超管，PRD §5.1）：协作者与创建者权限基本相同，
+           仅不能管理协作者、不能删除项目 -->
+      <button
+        v-if="canManageMembers"
+        class="drawer-toggle"
+        data-testid="collab-manage-btn"
+        title="添加/移除项目协作者（协作者可上传内容、导出评论、管理评论）"
+        @click="openCollab"
+      >
+        协作者 {{ overview.project.member_count }}
+      </button>
+      <!-- T8.3/T8.2 管理者工具区（T9.1：创建者或协作者）：上传原型/PRD + 导出评论（交付范围下拉） -->
+      <el-dropdown v-if="overview.project.is_manager" @command="onCreatorTool">
         <button class="drawer-toggle" data-testid="creator-tools">
-          {{ uploading ? '处理中…' : '创建者工具 ▾' }}
+          {{ uploading ? '处理中…' : '管理者工具 ▾' }}
         </button>
         <template #dropdown>
           <el-dropdown-menu>
@@ -1195,7 +1285,7 @@ onBeforeUnmount(() => {
           :current-user-email="currentUser?.email || ''"
           :focus-key="drawerFocusKey"
           :commentable="commentable"
-          :is-creator="overview.project.is_creator"
+          :is-manager="overview.project.is_manager"
           @refresh="refreshComments"
           @locate="locateComment"
         />
@@ -1207,6 +1297,59 @@ onBeforeUnmount(() => {
     <p v-if="loadError" class="empty">{{ loadError }}</p>
     <p v-else class="empty">加载中…</p>
   </main>
+
+  <!-- T9.1 协作者管理弹窗（仅创建者/超管，PRD §5.1）：从用户表按邮箱加人 -->
+  <el-dialog
+    v-model="collabVisible"
+    title="项目协作者"
+    width="520px"
+    data-testid="collab-dialog"
+  >
+    <p class="recon-note">
+      协作者拥有创建者除「管理协作者、删除项目」外的全部权限（上传内容、导出评论、
+      可评论开关、评论管理与状态流转）。协作者从平台用户表中按邮箱添加。
+    </p>
+    <div class="collab-add-row">
+      <el-input
+        v-model="collabEmail"
+        placeholder="输入用户邮箱精确匹配（如 zhang@corp.com）"
+        data-testid="collab-email-input"
+        :disabled="collabAdding"
+        @keyup.enter="onAddMember"
+      />
+      <el-button
+        type="primary"
+        :loading="collabAdding"
+        data-testid="collab-add-btn"
+        @click="onAddMember"
+      >
+        添加
+      </el-button>
+    </div>
+    <p v-if="collabLoading" class="empty">加载中…</p>
+    <el-table v-else-if="members.length" :data="members" size="small" data-testid="collab-table">
+      <el-table-column prop="name" label="姓名" width="100" />
+      <el-table-column prop="email" label="邮箱" min-width="160" />
+      <el-table-column prop="added_by" label="添加人" width="90" />
+      <el-table-column label="添加时间" width="100">
+        <template #default="{ row }">{{ row.created_at.slice(0, 10) }}</template>
+      </el-table-column>
+      <el-table-column label="" width="70">
+        <template #default="{ row }">
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :data-testid="`collab-remove-${row.user_id}`"
+            @click="onRemoveMember(row)"
+          >
+            移除
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <p v-else class="empty" data-testid="collab-empty">暂无协作者</p>
+  </el-dialog>
 
   <!-- T3.3 对账明细弹窗 -->
   <el-dialog
@@ -1392,6 +1535,14 @@ onBeforeUnmount(() => {
 
 /* 对账明细弹窗 */
 .recon-note { margin: 0 0 12px; font-size: 13px; color: var(--pp-text-2); }
+
+/* T9.1 协作者弹窗：邮箱输入 + 添加按钮一行 */
+.collab-add-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.collab-add-row .el-input { flex: 1; }
 .recon-sub { margin: 14px 0 6px; font-size: 13px; color: var(--pp-text-1); }
 .recon-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 2; }
 .recon-list .dim { color: var(--pp-text-3); font-size: 12px; }

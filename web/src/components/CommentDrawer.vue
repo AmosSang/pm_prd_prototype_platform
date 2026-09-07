@@ -30,7 +30,10 @@ const props = defineProps<{
   currentUserEmail: string
   focusKey?: string
   commentable?: boolean
-  // T8.4：创建者（批量流转/跨状态编辑删除/标记已修改专属）
+  // T9.1 权限矩阵 V2：管理者（创建者或协作者）——批量流转/跨状态编辑删除/标记已修改。
+  // isManager 优先；isCreator 保留兼容（未传 isManager 时回退，等价旧语义）。
+  isManager?: boolean
+  /** @deprecated T9.1 起用 isManager（协作者同权） */
   isCreator?: boolean
 }>()
 
@@ -38,6 +41,9 @@ const emit = defineEmits<{
   refresh: []
   locate: [comment: CommentItem]
 }>()
+
+/** T9.1：管理者判定（isManager 优先，isCreator 兼容回退） */
+const isManager = computed(() => props.isManager ?? props.isCreator ?? false)
 
 const rootEl = ref<HTMLElement | null>(null)
 
@@ -235,7 +241,7 @@ async function onDelete(c: CommentItem) {
  * 待确认/已确认待修改态；「可评论」关闭时一律不允许（写操作冻结）。 */
 function canEdit(c: CommentItem): boolean {
   if (props.commentable === false) return false
-  if (props.isCreator) return true
+  if (isManager.value) return true
   return (
     c.author_email === props.currentUserEmail &&
     EDITABLE.includes(c.status)
@@ -248,7 +254,7 @@ function canEdit(c: CommentItem): boolean {
  * （T 增强：底层已是任意→任意，这里只是快捷方式）。 */
 function canMarkDone(c: CommentItem): boolean {
   return (
-    props.isCreator &&
+    isManager.value &&
     props.commentable !== false &&
     c.status === '已确认待修改'
   )
@@ -355,7 +361,7 @@ watch(
     </div>
 
     <!-- T 增强：批量修改状态（单个按钮 + 目标状态菜单；任意→任意，仅创建者） -->
-    <div v-if="isCreator" class="drawer-actions">
+    <div v-if="isManager" class="drawer-actions">
       <el-dropdown
         :disabled="!checkedList.length || busy || commentable === false"
         trigger="click"

@@ -47,12 +47,13 @@ server/.venv/bin/python -m server.cli user-add e2e-flow@test.local 登录流测�
 server/.venv/bin/python -m server.cli user-add e2e-reload@test.local 刷新恢复测试员 >/dev/null 2>&1 || true
 server/.venv/bin/python -m server.cli user-add e2e-rate@test.local 频控测试员 >/dev/null 2>&1 || true
 server/.venv/bin/python -m server.cli user-add perm@test.local 权限测试员 >/dev/null 2>&1 || true
-rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" "/tmp/ppp-fake-mailbox/perm@test.local" 2>/dev/null || true
+server/.venv/bin/python -m server.cli user-add collab@test.local 协作者E2E >/dev/null 2>&1 || true
+rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" "/tmp/ppp-fake-mailbox/perm@test.local" "/tmp/ppp-fake-mailbox/collab@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
 import shutil
-from server.models import Comment, Project, User, VerificationCode, init_tables
+from server.models import Comment, Project, ProjectMember, User, VerificationCode, init_tables
 init_tables()
-n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local', 'perm@test.local']).execute()
+n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local', 'perm@test.local', 'collab@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
 # 清 T2.3/T2.4/T3.x/T4.x/T8.1 E2E 建的项目记录与本地目录（否则重复跑 smoke
 # 卡片越积越多——残留同名卡片会让按名定位的用例 strict mode 冲突）。
@@ -62,13 +63,15 @@ print(f'[smoke] 清理 e2e 频控记录 {n} 条')
 from server.config import PROJECTS_DIR
 import os
 e2e_projects = list(Project.select().where(
-    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目', '工具区E2E项目', '揭示流水线E2E'])
+    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目', '工具区E2E项目', '揭示流水线E2E', '协作E2E项目'])
     | Project.name.startswith('同步E2E-')
 ))
 e2e_ids = [p.id for p in e2e_projects]
 if e2e_ids:
     nc = Comment.delete().where(Comment.project << e2e_ids).execute()
     print(f'[smoke] 清理 e2e 评论 {nc} 条')
+    nm = ProjectMember.delete().where(ProjectMember.project << e2e_ids).execute()
+    print(f'[smoke] 清理 e2e 协作者 {nm} 条')
 for p in e2e_projects:
     shutil.rmtree(os.path.join(PROJECTS_DIR, p.project_id), ignore_errors=True)
     p.delete_instance()
