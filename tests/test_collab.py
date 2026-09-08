@@ -276,19 +276,27 @@ class TestPermissionMatrix:
         resp = client.patch(f"/api/projects/{pid}", json={"commentable": False})
         assert resp.status_code == 403
 
-    # ── 编辑/删除任意评论（创建者 ✓ / 协作者 ✓ / 路人仅自己的）──
+    # ── 编辑评论（T10.3 收紧：仅作者本人，创建者/协作者也不可编辑他人）──
 
-    def test_edit_any_comment_matrix(self, app):
+    def test_edit_own_comment_only_matrix(self, app):
+        """T10.3（2026-09-07 用户决策）：编辑他人评论内容一律 403——
+        创建者/协作者/超管都不例外（编辑留痕完整性优先）；
+        作者本人编辑自己的评论规则不变（限待确认/已确认态）。"""
         client, _ = app
         pid = self._setup_with_collab(client)
         cid = _mk_comment(pid)  # 作者=路人甲(other@corp.com)
 
-        # 协作者 ✓ 编辑他人任意状态评论
+        # 创建者 ✗ 编辑他人评论（T10.3 收紧，原 V2 允许）
+        _login(client, U_CREATOR, "pm@corp.com", "创建者桑")
+        resp = client.patch(f"/api/comments/{cid}", json={"content": "创建者改的"})
+        assert resp.status_code == 403, resp.get_json()
+
+        # 协作者 ✗ 编辑他人评论（T10.3 收紧，原 V2 允许）
         _login(client, U_COLLAB, "collab@corp.com", "协作者林")
         resp = client.patch(f"/api/comments/{cid}", json={"content": "协作者改的"})
-        assert resp.status_code == 200, resp.get_json()
+        assert resp.status_code == 403, resp.get_json()
 
-        # 超管 ✗ 编辑他人评论（非管理者、非作者）
+        # 超管 ✗ 编辑他人评论
         _login(client, U_ADMIN, "boss@corp.com", "超管")
         resp = client.patch(f"/api/comments/{cid}", json={"content": "超管改的"})
         assert resp.status_code == 403

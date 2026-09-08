@@ -580,13 +580,17 @@ class TestEditComment:
         assert "scope" not in fj
 
     def test_edit_rules(self, app, project):
-        """编辑规则（T8.4 §6）：创建者可编辑任意状态；非创建者作者限自己的
-        评论且仅待确认/已确认待修改态；非作者 403；空内容/无字段 400。"""
+        """编辑规则（T8.4 §6 + T10.3 收紧）：编辑内容仅作者本人（创建者/
+        协作者也不可编辑他人，留痕完整性优先）；作者限待确认/已确认待修改态；
+        非作者 403；空内容/无字段 400。删除/状态流转仍为管理者任意。"""
         client, p = project
-        # 创建者作者 c1：忽略态仍可编辑（创建者跨状态管理者语义）
+        # 创建者作者 c1：自己的评论在忽略态不可编辑（T10.3：不再有管理者
+        # 跨状态豁免，作者编辑同样限待确认/已确认态）
         c1 = _submit_simple(client, p)
         client.post("/api/comments/batch-status", json={"cids": [c1], "status": "忽略"})
-        assert client.patch(f"/api/comments/{c1}", json={"content": "创建者改忽略态"}).status_code == 200
+        resp = client.patch(f"/api/comments/{c1}", json={"content": "创建者改忽略态"})
+        assert resp.status_code == 400
+        assert "不可编辑" in resp.get_json()["msg"]
 
         # 非创建者作者（uid=2）发评论 c2：待确认态可编辑；忽略态不可编辑
         with client.session_transaction() as sess:
@@ -608,18 +612,23 @@ class TestEditComment:
         assert resp.status_code == 400
         assert "不可编辑" in resp.get_json()["msg"]
 
-        # 非作者（uid=3，非创建者非作者）→ 403
+        # 非作者（uid=3，非作者）→ 403（T10.3：创建者编辑他人评论同样 403）
         with client.session_transaction() as sess:
             sess["uid"] = 3
             sess["email"] = "third@corp.com"
             sess["name"] = "第三人"
         assert client.patch(f"/api/comments/{c2}", json={"content": "第三人改"}).status_code == 403
-
-        # 恢复创建者 → 空内容 / 无字段 400
         with client.session_transaction() as sess:
             sess["uid"] = 1
             sess["email"] = "pm@corp.com"
             sess["name"] = "产品桑"
+        assert client.patch(f"/api/comments/{c2}", json={"content": "创建者改他人"}).status_code == 403
+
+        # 恢复作者本人 → 空内容 / 无字段 400（T10.3：编辑仅作者本人）
+        with client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["email"] = "other@corp.com"
+            sess["name"] = "其他人"
         assert client.patch(f"/api/comments/{c2}", json={"content": " "}).status_code == 400
         assert client.patch(f"/api/comments/{c2}", json={}).status_code == 400
 

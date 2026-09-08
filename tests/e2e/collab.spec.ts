@@ -100,6 +100,33 @@ test('T9.1 协作者全链路：添加 → 协作者可上传 → 管理协作�
   const delP = await pc.request.delete(`/api/projects/${proj.id}`)
   expect(delP.status(), '协作者删项目应 403').toBe(403)
 
+  // ── T10.3 收紧：协作者不可编辑他人评论内容（创建者同理），删除仍可 ──
+  const mkC = await request.post(`/api/projects/${proj.id}/comments`, {
+    data: {
+      payload: {
+        target_type: 'dom',
+        prototype_page: 'index.html',
+        anchor_id: 'page-login',
+        nearest_anchor_id: '',
+        css_path: '[data-pa="page-login"]',
+        outer_html: '<main data-pa="page-login">登录页</main>',
+        text_excerpt: '登录页',
+        interaction_state: { modal_open: false, viewport: '1440x900', scroll_y: 0, route: 'index.html' },
+      },
+      content: '创建者留的评论',
+      priority: 'P2',
+      scope: 'prototype',
+    },
+  })
+  expect(mkC.status()).toBe(200)
+  const creatorCid = (await mkC.json()).data.comment_id as string
+  const editOther = await pc.request.patch(`/api/comments/${creatorCid}`, {
+    data: { content: '协作者试图改创建者的评论' },
+  })
+  expect(editOther.status(), '协作者编辑他人评论应 403（T10.3）').toBe(403)
+  const delOther = await pc.request.delete(`/api/comments/${creatorCid}`)
+  expect(delOther.status(), '协作者删除他人评论仍 200（T10.3 保留）').toBe(200)
+
   // ── 创建者移除协作者 → 协作者下一次写操作立即 403 ──
   const listResp = await request.get(`/api/projects/${proj.id}/members`)
   const rows = (await listResp.json()).data as { user_id: number; email: string }[]

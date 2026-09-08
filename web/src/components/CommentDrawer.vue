@@ -237,11 +237,12 @@ async function onDelete(c: CommentItem) {
   }
 }
 
-/** T8.4 §6：创建者可编辑/删除任意状态；作者限自己的评论且仅
- * 待确认/已确认待修改态；「可评论」关闭时一律不允许（写操作冻结）。 */
+/** T8.4 §6 + T10.3 收紧：编辑内容仅作者本人（限待确认/已确认待修改态）——
+ * 创建者/协作者/超管也不可编辑他人评论（编辑留痕完整性优先，评审发言
+ * 不可被他人篡改）；删除/状态流转仍是管理者任意（可见的容错代管动作）。
+ * 「可评论」关闭时一律不允许（写操作冻结）。 */
 function canEdit(c: CommentItem): boolean {
   if (props.commentable === false) return false
-  if (isManager.value) return true
   return (
     c.author_email === props.currentUserEmail &&
     EDITABLE.includes(c.status)

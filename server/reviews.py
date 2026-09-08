@@ -472,23 +472,26 @@ def _get_live_comment(cid: str) -> Comment | None:
 
 @bp.patch("/api/comments/<cid>")
 def edit_comment(cid: str):
-    """作者编辑（产品方案 §4.5 编辑规则）：仅作者 + 待确认/已确认待修改态。
+    """作者编辑（产品方案 §4.5 编辑规则）：仅作者本人 + 待确认/已确认待修改态。
 
     可改 content（T 增强：移除 priority/scope）。DB 先更新，T8.1 去 Git
     本地化后直接改写项目目录内评论 JSON（无队列）。项目关闭可评论时拒绝。
+
+    T10.3 权限收紧（2026-09-07 用户决策）：**编辑他人评论内容一律禁止，
+    创建者/协作者/超管也不例外**——编辑留痕的完整性优先（评审发言不可被
+    他人篡改）；管理者保留删除任意评论与状态流转的权力（容错代管够用，
+    删除有 toast/确认且评论列表可见变动，篡改则无声）。
     """
     c = _get_live_comment(cid)
     if not c:
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法编辑"), 400
-    # T9.1 权限矩阵 V2：管理者（创建者/协作者）编辑任意评论不受状态限制；
-    # 作者限自己的评论且仅待确认/已确认待修改态。
-    if not _is_manager(c.project, session.get("uid")):
-        if c.author_email != session.get("email"):
-            return jsonify(code=403, msg="仅评论作者或项目管理者可编辑"), 403
-        if c.status not in EDITABLE_STATUSES:
-            return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
+    # 仅作者本人可编辑内容（T10.3：管理者不再豁免）；作者限待确认/已确认态
+    if c.author_email != session.get("email"):
+        return jsonify(code=403, msg="仅评论作者本人可编辑内容"), 403
+    if c.status not in EDITABLE_STATUSES:
+        return jsonify(code=400, msg=f"「{c.status}」状态的评论不可编辑"), 400
 
     data = request.get_json(silent=True) or {}
     fields: dict = {}
@@ -522,7 +525,8 @@ def delete_comment(cid: str):
         return jsonify(code=404, msg="评论不存在"), 404
     if not c.project.commentable:
         return jsonify(code=400, msg="项目已关闭评论，无法删除"), 400
-    # T9.1 权限矩阵 V2：管理者（创建者/协作者）删除任意评论不受状态限制；
+    # T9.1 权限矩阵 V2：管理者（创建者/协作者）删除任意评论不受状态限制
+    # （T10.3 保留：删除是可见的容错代管动作，与无声篡改的「编辑」性质不同）；
     # 作者限自己的评论且仅待确认/已确认待修改态。
     if not _is_manager(c.project, session.get("uid")):
         if c.author_email != session.get("email"):
