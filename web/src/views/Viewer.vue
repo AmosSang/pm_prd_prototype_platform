@@ -985,11 +985,14 @@ function extractToc(): void {
   tocItems.value = items
 }
 
-/** 展开收起规则（PRD §5.4.3 用户确认版 + 2026-09-07 修订）：
- * 三栏（评论抽屉打开）强制收起；split 模式默认展开、可手动收起；
- * 收起时大纲栏整体消失（文档区占满整行），不是藏列表留空壳。
- * （整屏强制展开的规则在阶段 11 整屏布局落地时接线。） */
-const tocCollapsed = computed(() => drawerOpen.value || tocManuallyCollapsed.value)
+/** 展开收起规则（PRD §5.4.3 + §5.3.2 全态）：
+ * split 默认展开、可手动收起；三栏（评论抽屉打开）强制收起；
+ * prd-full 整屏强制展开（T11.1 补全第三态）；收起时大纲栏整体消失。
+ * prd-full 下手动收起被忽略（强制展开优先），按钮在整屏下隐藏。 */
+const tocCollapsed = computed(() => {
+  if (prdFull.value) return false
+  return drawerOpen.value || tocManuallyCollapsed.value
+})
 
 /** 三栏（评论抽屉打开）时点「目录」→ toast 说明原因，不改手动偏好。
  * drawerOpen 恢复 split 后大纲按既有偏好自动回来，无需用户再点。 */
@@ -1038,6 +1041,46 @@ const reconHasIssue = computed(() => {
   )
 })
 
+// ───────────────────── T11.1 整屏布局状态机（PRD §5.3.2）─────────────────────
+// 三态：split（默认分屏）/ proto-full（原型独占）/ prd-full（文档独占）。
+// 本质是「收起某一侧」：评论能力与锚点联动全程保留（不新开标签页）。
+// 比例记忆：进入整屏前记住 split 比例，还原时恢复；刷新回默认 split（不持久化）。
+type LayoutMode = 'split' | 'proto-full' | 'prd-full'
+const layout = ref<LayoutMode>('split')
+const savedProtoPct = ref(50) // 进入整屏前的 split 比例快照
+let fullscreenToastShown = false // 首次进入整屏 toast（每页面会话一次）
+
+/** 侧栏是否处于整屏（用于宽类计算与联动恢复判断）。 */
+const protoFull = computed(() => layout.value === 'proto-full')
+const prdFull = computed(() => layout.value === 'prd-full')
+const isFullscreen = computed(() => layout.value !== 'split')
+
+/** 进入整屏：记住当前 split 比例 → 切态。首次 toast 提示联动自动恢复。 */
+function enterFullscreen(mode: 'proto-full' | 'prd-full'): void {
+  if (layout.value === 'split') savedProtoPct.value = protoPct.value
+  layout.value = mode
+  if (!fullscreenToastShown) {
+    fullscreenToastShown = true
+    ElMessage.info('已进入整屏；点击锚点联动会自动恢复分屏（Esc 也可还原）')
+  }
+}
+
+/** 还原 split：恢复进入前的比例。幂等（split 下调用无操作）。 */
+function exitFullscreen(): void {
+  if (layout.value === 'split') return
+  protoPct.value = savedProtoPct.value
+  layout.value = 'split'
+}
+
+/** Esc 退出整屏（PRD §5.3.2 建议项）。输入框聚焦时不拦截。 */
+function onViewerKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && isFullscreen.value) {
+    const el = document.activeElement
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable)) return
+    exitFullscreen()
+  }
+}
+
 // ───────────────────────── 分割条拖动（T8.6 三栏：原型|文档|评论） ─────────────────────────
 // 两把分割条：proto（原型|文档）+ drawer（文档|评论）。三栏宽度百分比，
 // pointer 捕获 + 全局 move/up。评论抽屉关闭时 drawerPct 不参与，文档占剩余。
@@ -1046,8 +1089,13 @@ const drawerPct = ref(28)
 const dragging = ref<'proto' | 'drawer' | null>(null)
 const containerEl = ref<HTMLElement | null>(null)
 
-/** 文档（中间栏）宽度：100 - 原型 - 评论（抽屉关闭时评论占位 0，文档填满剩余）。 */
-const prdPct = computed(() => Math.max(15, 100 - protoPct.value - (drawerOpen.value ? drawerPct.value : 0)))
+/** 文档（中间栏）宽度：100 - 原型 - 评论（抽屉关闭时评论占位 0，文档填满剩余）。
+ * T11.1：整屏态由布局状态机接管——proto-full 时原型 100%、文档/分割条收起；
+ * prd-full 时文档占满（原型栏收起），抽屉照常让宽（整屏栏 + 抽屉两栏）。 */
+const prdPct = computed(() => {
+  if (prdFull.value) return 100 - (drawerOpen.value ? drawerPct.value : 0)
+  return Math.max(15, 100 - protoPct.value - (drawerOpen.value ? drawerPct.value : 0))
+})
 
 function onDividerDown(e: PointerEvent, kind: 'proto' | 'drawer') {
   dragging.value = kind
@@ -1093,6 +1141,7 @@ async function reloadOverview() {
 
 onMounted(async () => {
   window.addEventListener('message', onMessage)
+  window.addEventListener('keydown', onViewerKeydown) // T11.1 Esc 退出整屏
   try {
     await loadOverview()
   } catch (e) {
@@ -1101,6 +1150,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('message', onMessage)
+  window.removeEventListener('keydown', onViewerKeydown)
   if (highlightTimer) clearTimeout(highlightTimer)
   disarmReadyWatchdog()
 })
@@ -1205,10 +1255,33 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="v-body" ref="containerEl">
-      <!-- 左：原型 -->
-      <section class="pane proto" :style="{ width: protoPct + '%' }">
+      <!-- 左：原型（T11.1：proto-full 整屏，v-if 收起侧栏） -->
+      <section
+        v-if="!prdFull"
+        class="pane proto"
+        :style="{ width: protoFull ? '100%' : protoPct + '%' }"
+      >
         <div class="pane-head">
           <span>原型</span>
+          <!-- T11.1 整屏切换：split 显「放大」、proto-full 显「还原」 -->
+          <button
+            v-if="layout === 'split'"
+            class="fs-toggle"
+            data-testid="proto-fs-enter"
+            title="原型整屏（独占内容区）"
+            @click="enterFullscreen('proto-full')"
+          >
+            ⤢ 放大
+          </button>
+          <button
+            v-else-if="protoFull"
+            class="fs-toggle"
+            data-testid="proto-fs-exit"
+            title="还原分屏（Esc）"
+            @click="exitFullscreen"
+          >
+            ⤡ 还原
+          </button>
           <el-select
             v-if="overview.proto_entries.length > 1"
             v-model="currentEntry"
@@ -1265,8 +1338,9 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <!-- 分割条（原型 | 文档） -->
+      <!-- 分割条（原型 | 文档）：整屏态收起 -->
       <div
+        v-if="layout === 'split'"
         class="divider"
         :class="{ dragging: dragging === 'proto' }"
         data-testid="divider"
@@ -1276,10 +1350,33 @@ onBeforeUnmount(() => {
         @pointercancel="onDividerUp"
       />
 
-      <!-- 中：PRD -->
-      <section class="pane prd" :style="{ width: prdPct + '%' }">
+      <!-- 中：PRD（T11.1：prd-full 整屏，v-if 收起原型侧时文档占满） -->
+      <section
+        v-if="!protoFull"
+        class="pane prd"
+        :style="{ width: prdPct + '%' }"
+      >
         <div class="pane-head">
           <span>PRD 文档</span>
+          <!-- T11.1 整屏切换：split 显「放大」、prd-full 显「还原」 -->
+          <button
+            v-if="layout === 'split'"
+            class="fs-toggle"
+            data-testid="prd-fs-enter"
+            title="文档整屏（独占内容区，大纲自动展开）"
+            @click="enterFullscreen('prd-full')"
+          >
+            ⤢ 放大
+          </button>
+          <button
+            v-else-if="prdFull"
+            class="fs-toggle"
+            data-testid="prd-fs-exit"
+            title="还原分屏（Esc）"
+            @click="exitFullscreen"
+          >
+            ⤡ 还原
+          </button>
           <el-select
             v-if="overview.docs.length > 1"
             v-model="currentDoc"
@@ -1290,9 +1387,9 @@ onBeforeUnmount(() => {
             <el-option v-for="d in overview.docs" :key="d" :label="d" :value="d" />
           </el-select>
           <span v-else-if="overview.docs.length === 1" class="doc-name">{{ currentDoc }}</span>
-          <!-- T10.2 大纲收起/展开（split 模式下可切换；三栏强制收起由 tocCollapsed 驱动） -->
+          <!-- T10.2 大纲收起/展开：split 可切换；三栏强制收起（toast）；prd-full 强制展开（按钮隐藏，T11.1） -->
           <button
-            v-if="tocItems.length"
+            v-if="tocItems.length && layout === 'split'"
             class="toc-toggle"
             data-testid="toc-toggle"
             :title="tocCollapsed ? '展开目录' : '收起目录'"
@@ -1802,6 +1899,19 @@ onBeforeUnmount(() => {
   background: var(--pp-surface);
   min-width: 0;
 }
+/* T11.1 整屏切换按钮（pane-head 放大/还原） */
+.fs-toggle {
+  border: 1px solid var(--pp-border-strong);
+  border-radius: 999px;
+  background: var(--pp-surface);
+  color: var(--pp-text-2);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 3px 10px;
+}
+.fs-toggle:hover { color: var(--pp-primary); border-color: var(--pp-primary); }
+
 /* T10.2 大纲收起切换按钮（pane-head 右区）。
    注意 doc-name/ready 也用 margin-left:auto 推右——toc-toggle 插入中间时
    flex 的 auto margin 规则：第一个 auto 吃掉全部剩余空间，后续不冲突。 */
