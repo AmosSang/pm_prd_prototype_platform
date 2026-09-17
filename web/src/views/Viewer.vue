@@ -544,6 +544,8 @@ function docLocKeyOf(c: CommentItem): string {
  * dom/page → 切到评论所在原型页（等 READY），锚点或 css_path 闪烁
  * （page 评论 cssPath='body' 整页闪烁）。 */
 async function locateComment(c: CommentItem) {
+  // T11.2：目标侧整屏收起时先还原 split（doc_block→文档、dom/page→原型）
+  ensureSplitFor(c.target_type === 'doc_block' ? 'doc' : 'proto')
   if (c.target_type === 'doc_block') {
     const docFile = (c.payload.doc_file as string) || ''
     const flash = () => {
@@ -678,8 +680,26 @@ function flashDocAnchor(el: HTMLElement) {
   highlightTimer = setTimeout(() => el.classList.remove('anchor-highlight'), 2000)
 }
 
+/** T11.2 联动自动恢复：联动目标侧若处于整屏收起状态 → 先还原 split。
+ * PRD §5.3.2：正向联动（目标=文档）在 proto-full 时还原；反向联动/抽屉
+ * 定位原型（目标=原型）在 prd-full 时还原。比例随 exitFullscreen 恢复。
+ * 返回是否发生了还原（用于需要等 DOM 重排的调用方）。 */
+function ensureSplitFor(target: 'doc' | 'proto'): boolean {
+  if (layout.value === 'split') return false
+  if (target === 'doc' && layout.value === 'proto-full') {
+    exitFullscreen()
+    return true
+  }
+  if (target === 'proto' && layout.value === 'prd-full') {
+    exitFullscreen()
+    return true
+  }
+  return false
+}
+
 /** 正向联动入口（ANCHOR_CLICK）。当前文档未命中 → 跨文档切换后定位。 */
 async function jumpToDocAnchor(anchorId: string) {
+  if (ensureSplitFor('doc')) await nextTick() // T11.2：文档侧收起时先还原再定位
   const el = findDocAnchor(anchorId)
   if (el) {
     flashDocAnchor(el)
@@ -774,6 +794,7 @@ function gotoToast(res: { hit: boolean; reason: string }, anchorId?: string) {
 /** 反向联动入口：文档「定位」按钮点击。 */
 function locateAnchor(anchorId: string) {
   if (!overview.value) return
+  ensureSplitFor('proto') // T11.2：原型侧收起（prd-full）时先还原再定位
   // 目标原型文件三级查找：页面地图（页面锚点）→ 锚点索引（组件锚点）→ 当前页
   const mapHit = overview.value.page_map.find((e) => e.anchor === anchorId)
   const indexHit = overview.value.proto_anchor_index[anchorId]
