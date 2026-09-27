@@ -1,9 +1,13 @@
 flask==3.0.3
 flask-cors==4.0.1
 peewee==3.17.6
-cryptography==42.0.8
+# T12.3：cryptography 现为 fastmcp（authlib 依赖链）的传递依赖；直接用它的
+# crypto_util 已随 T8.1 移除，此版本与 fastmcp 3.4.7 实测组合一致
+cryptography==50.0.1
 GitPython==3.1.43
 beautifulsoup4==4.12.3
 Pillow==10.4.0
 pytest==8.3.2
 ruff==0.5.6
+# T12.3 MCP Server：锁小版本（FastMCP 迭代快，升级需过全量 make check）
+fastmcp==3.4.7

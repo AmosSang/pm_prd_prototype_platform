@@ -13,10 +13,12 @@
 platform/
 ├── AGENTS.md          本文件（AI 协作上下文，每次会话自动读取）
 ├── Makefile           dev / check / smoke / clean 命令入口
-├── docker-compose.yml 一键起环境（开发与部署同构）
+├── docker-compose.yml 一键起环境（server + mcp 双服务，同镜像不同入口）
 ├── server/            Flask 后端
 │   ├── app.py         工厂 + 蓝图注册
 │   ├── config.py      环境变量（PLATFORM_SECRET、SMTP、路径、上传上限）
+│   ├── mcp_loopback.py MCP→Flask 回环 HTTP 客户端（Bearer 透传；T12.3）
+│   ├── mcp_server.py  MCP Server（FastMCP 壳 + 工具；T12.3 只读五工具）
 │   ├── requirements.txt
 │   └── ...
 ├── web/               Vue 3 前端
@@ -126,6 +128,13 @@ status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再�
 - `get_all_comments` 返回与 reviews/comments/*.json 及导出包同构（一份契约三处复用）；截图 PNG 不入返回，screenshot 保留相对路径
 - FastMCP 进程回环调 Flask API（不直连 DB）；上传复用 Flask 安全校验全链路；MCP Server instructions 含平台概念速览与意图映射
 - 上传即覆盖旧版本——工具描述必须明示，Agent 应向用户复述确认
+
+> 实施状态（T12.3 已落地）：`server/mcp_server.py` 只读五工具 + instructions；
+> `server/mcp_loopback.py` 回环客户端（测试可注入 Flask test_client transport）；
+> 回环目标 `PPP_API_BASE`（默认 http://127.0.0.1:8081，compose 内 http://server:8081）；
+> 监听 `MCP_HOST`/`MCP_PORT`（默认 0.0.0.0:8082）。本地联调：先起 Flask，
+> 再 `server/.venv/bin/python server/mcp_server.py`。fastmcp 锁 3.4.7（requirements）。
+> `list_projects` 口径依赖 Flask `_project_public` 的 `comment_count`（T12.3 新增可选字段）。
 
 ## 8 阶段 9 改造面清单（T9.1 核对底稿，grep 核实于 2026-09-07）
 

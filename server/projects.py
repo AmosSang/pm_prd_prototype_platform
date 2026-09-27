@@ -73,10 +73,19 @@ def _is_manager(p: Project, uid: int | None) -> bool:
 
 
 def _project_public(p: Project) -> dict:
-    """列表/详情对外字段（含创建者、is_creator/is_manager 标记与协作者数）。"""
+    """列表/详情对外字段（含创建者、is_creator/is_manager 标记与协作者数）。
+
+    T12.3 新增 comment_count（MCP list_projects 口径要求；对既有消费方为
+    新增可选字段，向前兼容）。
+    """
     uid = session.get("uid")
     member_count = (
         ProjectMember.select().where(ProjectMember.project == p.id).count()
+    )
+    comment_count = (
+        Comment.select()
+        .where(Comment.project == p.id, Comment.deleted == False)  # noqa: E712
+        .count()
     )
     return {
         "id": p.id,
@@ -86,6 +95,7 @@ def _project_public(p: Project) -> dict:
         "is_creator": uid is not None and uid == p.creator_id,
         "is_manager": _is_manager(p, uid),
         "member_count": member_count,
+        "comment_count": comment_count,
         "commentable": p.commentable,
         "content_updated_at": p.content_updated_at,
         "created_at": p.created_at,

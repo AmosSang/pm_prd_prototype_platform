@@ -1,7 +1,9 @@
 services:
   server:
     build:
-      context: ./server
+      # T12.3：上下文为仓库根（容器 /app 与仓库根同构，见 server/Dockerfile）
+      context: .
+      dockerfile: server/Dockerfile
     environment:
       - PLATFORM_SECRET=${PLATFORM_SECRET:-dev-secret-change-me}
       - SMTP_HOST=${SMTP_HOST:-}
@@ -15,6 +17,24 @@ services:
       - "8081:8081"
     volumes:
       - server-data:/data
+    restart: unless-stopped
+
+  # T12.3：MCP Server（FastMCP streamable-http，同镜像不同入口）。
+  # 工具经 compose 网络回环调 server（服务名解析）；生产由 Nginx /mcp 反代
+  # 本服务 8082（HTTPS 硬前置，T12.5）。
+  mcp:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ["python", "server/mcp_server.py"]
+    environment:
+      - PPP_API_BASE=http://server:8081
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8082
+    ports:
+      - "8082:8082"
+    depends_on:
+      - server
     restart: unless-stopped
 
 volumes:
