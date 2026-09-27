@@ -260,7 +260,7 @@ make smoke   # 自动起环境 → Playwright E2E（79 条）→ 清理
 
 ```
                              ┌───────────────┐
-  浏览器 ──► Nginx :80        │  Nginx 静态    │
+  浏览器 ──► Nginx :443(TLS) │  Nginx 静态    │
              │               │  web/dist     │
              │               └───┬───────────┘
              │ /api, /proto,      │
@@ -268,29 +268,31 @@ make smoke   # 自动起环境 → Playwright E2E（79 条）→ 清理
              │ /vendor, /shots    ▼
              │               ┌───────────────┐
              │               │  Flask 后端    │   gunicorn :8081
-             └──────────────►│  (单进程/多worker)│
+             └──────────────►│               │
                              └───┬───────────┘
-                                 │  SQLite + data/projects + data/shots
+                                 │  /data（SQLite + projects + shots + logs）
+  WorkBuddy Agent ──/mcp(TLS)──► Nginx /mcp ──► FastMCP :8082 ──回环HTTP──► Flask
 ```
 
 - **后端**用 `gunicorn` 托管（生产不建议 `python app.py` 的 dev server），数据目录 `data/` 持久化。
 - **前端**：`npm run build` 产出 `web/dist`，由 Nginx 托管；`/api` `/proto` `/bridge.js` `/vendor` `/shots` 等路径反代到后端。
+- **MCP 服务（T12.3/T12.4）**：FastMCP（streamable-http，:8082），工具经回环 HTTP 调 Flask（不直连 DB）；经 Nginx `/mcp` 反代给 WorkBuddy 等 Agent。**HTTPS 是硬前置**（Bearer Token 明令禁止走明文）。
 
-### 方式 A：Docker Compose（后端容器）
+### 方式 A：Docker Compose（server + mcp 双服务，推荐）
 
-仓库自带 `docker-compose.yml`（仅 `server` 服务）：
+仓库自带 `docker-compose.yml`（同一镜像跑 `server` 与 `mcp` 两个服务）：
 
 ```bash
 # 1. 准备 .env（供 compose 使用）
 cp .env.example .env
 
-# 2. 构建并启动后端
+# 2. 构建并启动（server: 8081，mcp: 8082）
 docker compose up -d --build
 
 # 3. 前端：本地 build 后由 Nginx 或任意静态服务托管 web/dist
 ```
 
-compose 会注入 `PLATFORM_SECRET`、`SMTP_*`，并把 `DATA_DIR=/data` 挂载到命名卷 `server-data`（持久化 SQLite 与项目文件）。
+compose 会为 `server` 注入 `PLATFORM_SECRET`、`SMTP_*`，两个服务共享数据卷 `server-data`（`/data`）——SQLite、项目文件与 MCP 上传审计日志（`/data/logs/mcp-ops.jsonl`）都在其中。`mcp` 服务通过本 compose 网络的 `http://server:8081` 回环调用 Flask。
 
 ### 方式 B：手动部署（systemd + Nginx 示例）
 
@@ -315,12 +317,16 @@ npm ci
 npm run build          # 产 web/dist
 ```
 
-**Nginx 示例**
+**Nginx 示例（含 HTTPS 与 /mcp 反代）**
 
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
+    http2 on;
     server_name your.domain;
+
+    ssl_certificate     /etc/letsencrypt/live/your.domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your.domain/privkey.pem;
 
     # 前端静态
     root /srv/platform/web/dist;
@@ -333,10 +339,31 @@ server {
     location /bridge.js { proxy_pass http://127.0.0.1:8081; }
     location /vendor/ { proxy_pass http://127.0.0.1:8081; }
 
-    # 上传体积对齐后端 MAX_CONTENT_LENGTH(110MB)
+    # MCP（T12.3/T12.4）：streamable-http；放行大 body（base64 上传）并关闭缓冲
+    location /mcp {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_buffering off;          # SSE 流式响应必需
+        proxy_read_timeout 300s;
+        client_max_body_size 200m;    # 100MB zip → ~134MB base64（见 docs/poc-report-mcp-upload.md）
+    }
+
+    # 其余上传路径对齐后端 MAX_CONTENT_LENGTH(110MB)；/mcp 已单独放大
     client_max_body_size 110m;
 }
+
+# HTTP → HTTPS（certbot 申请证书后自动生成/改写）
+server {
+    listen 80;
+    server_name your.domain;
+    return 301 https://$host$request_uri;
+}
 ```
+
+> **HTTPS 获取**：`certbot --nginx -d your.domain`（或云厂商证书直接配置 ssl_certificate 路径）。**MCP 接入强依赖 HTTPS**（Access Token 是账号凭证，明文传输不可接受）。
+>
+> 若 Agent 侧报 **413**：优先检查 `/mcp` 的 `client_max_body_size` 是否 ≥ 200m（base64 大文件上传路径）。
 
 > 注意：Nginx 反代时 `/api` 等路径需与后端保持一致；若前后端不同源，请同时配置 `WEB_ORIGIN` 或直接让 Nginx 同域反代以规避 CORS。
 
@@ -361,10 +388,43 @@ server {
 - [ ] `ADMIN_EMAIL` 已配置（否则无超管，无法建用户）
 - [ ] SMTP 真实可用（163 需 `SMTP_USE_SSL=1` + 授权码）
 - [ ] `client_max_body_size` ≥ 后端 `MAX_CONTENT_LENGTH`（上传原型 zip）
+- [ ] HTTPS 已启用；Nginx 已反代 `/mcp` → `127.0.0.1:8082`（含 `proxy_buffering off` 与 200m body 上限）
+- [ ] `docker compose up -d --build` 后 `server` 与 `mcp` 两容器均 `Up`
 - [ ] `make check` 与 `make smoke` 全绿
 - [ ] 生产用 `gunicorn`，不要用 dev server
 
 **排查：查看器原型区一直「加载中…」**：该指示由 bridge 在原型 `window.load` 后上报 `READY` 驱动。若长时间停在加载且刷新不恢复，先看浏览器 Network 是否有 `/bridge.js` 请求非 200（常见：Nginx 未反代 `/bridge.js`、`/vendor/`），或 Console 有报错。Viewer 已内置 READY 看门狗：8s 未就绪自动重载 iframe（上限 3 次），仍失败则显示红色「连接异常，点击重试」。
+
+### 部署后：MCP Agent 接入与联调（T12.5 手工清单）
+
+**① 生成 Token**：登录平台 → 顶栏「Agent 接入」→ 生成 Token（明文只显示一次）→ 复制页面上的「粘贴即用配置」。
+
+**② 配置 WorkBuddy**：将配置模板粘贴到 `~/.workbuddy/mcp.json`（或在「插件 → MCP 服务器 → 配置 MCP」界面粘贴）：
+
+```json
+{
+  "mcpServers": {
+    "product-plan-platform": {
+      "type": "http",
+      "url": "https://your.domain/mcp",
+      "headers": { "Authorization": "Bearer ppp_你的Token" }
+    }
+  }
+}
+```
+
+保存后确认服务器状态 🟢（工具列表应可见 7 个：`list_projects` / `get_project_overview` / `get_all_comments` / `get_prd_content` / `get_reconcile` / `upload_prototype` / `upload_prd`）。
+
+**③ 四场景联调**（勾选即验收通过）：
+
+- [ ] **连接**：WorkBuddy 工具列表完整可见；说「列出产品方案展示平台上我的项目」→ 返回真实项目
+- [ ] **一句话上传**：「把 {目录} 的最新原型传到 {项目}」→ Agent 匹配项目（多命中会先复述候选）→ 确认覆盖 → 上传成功，查看器立即可见新版
+- [ ] **一句话拉评论**：「拉取 {项目} 的全部评论」→ 返回与导出包同构的评论 JSON；可配合 `comment-revision-plan` 技能直接消费出修改计划
+- [ ] **权限拒绝**：换一个「参与者」（非创建者/协作者）的 Token 执行上传 → 结构化错误 `no_permission`；Token 撤销后立即 401
+
+**④ 完整闭环预演**：AI 改原型 → Agent 上传（场景 2）→ PM 在平台评论/确认状态 → Agent 拉评论（场景 3）→ AI 再改。全程记录耗时与卡点。
+
+> 本地预演（无需服务器）：`bash .devtools/mcp-probe.sh`（起 Flask + MCP 双服务跑真链路探测，覆盖 7 工具与真实上传；`.devtools/` 为本机开发辅助目录、不入库）。
 
 ---
 
