@@ -275,6 +275,15 @@ test.describe('T4.1 评论模式元素采集', () => {
     // iframe 内 hash 导航（SPA 路由模拟；fragment 导航不重载页面）→
     // bridge hashchange 上报 → 宿主显示当前路由（pp-nonce 被剔除）。
     // frameLocator 无 evaluate，经 locator.evaluate 在 frame 上下文执行。
+    // 先等 bridge 就绪再改 hash：hashchange 监听在 bridge 脚本执行时挂载，
+    // 而 [data-pa] 元素可见早于 </body> 前的 bridge 执行，直接改 hash 存在
+    // 「事件早于监听挂载」的竞态（并发负载下偶发漏事件，单跑稳定）。
+    // __PP_BRIDGE__ 在 IIFE 顶部同步设置，JS 单线程下外部观测到即挂载完毕。
+    await expect
+      .poll(() =>
+        protoFrame.locator('body').evaluate(() => Boolean((window as any).__PP_BRIDGE__)),
+      )
+      .toBe(true)
     await protoFrame.locator('body').evaluate(() => {
       window.location.hash = '#/spa-view'
     })

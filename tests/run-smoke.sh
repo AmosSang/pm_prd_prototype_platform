@@ -51,10 +51,13 @@ server/.venv/bin/python -m server.cli user-add collab@test.local 协作者E2E >/
 rm -f "/tmp/ppp-fake-mailbox/e2e@test.local" "/tmp/ppp-fake-mailbox/perm@test.local" "/tmp/ppp-fake-mailbox/collab@test.local" 2>/dev/null || true
 server/.venv/bin/python -c "
 import shutil
-from server.models import Comment, Project, ProjectMember, User, VerificationCode, init_tables
+from server.models import ApiToken, Comment, Project, ProjectMember, User, VerificationCode, init_tables
 init_tables()
 n = VerificationCode.delete().where(VerificationCode.email << ['e2e@test.local', 'e2e-flow@test.local', 'e2e-reload@test.local', 'e2e-rate@test.local', 'perm@test.local', 'collab@test.local']).execute()
 print(f'[smoke] 清理 e2e 频控记录 {n} 条')
+# T12.2：Agent 接入页 E2E 生成的 Token（e2e- 前缀）跨 run 清掉
+nt = ApiToken.delete().where(ApiToken.name.startswith('e2e-')).execute()
+print(f'[smoke] 清理 e2e Token {nt} 条')
 # 清 T2.3/T2.4/T3.x/T4.x/T8.1 E2E 建的项目记录与本地目录（否则重复跑 smoke
 # 卡片越积越多——残留同名卡片会让按名定位的用例 strict mode 冲突）。
 # 评论外键引用 projects，须先删。
@@ -63,9 +66,16 @@ print(f'[smoke] 清理 e2e 频控记录 {n} 条')
 from server.config import PROJECTS_DIR
 import os
 e2e_projects = list(Project.select().where(
-    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目', '工具区E2E项目', '揭示流水线E2E', '协作E2E项目'])
+    (Project.name << ['E2E绑定项目', '错误token项目', '分屏E2E项目', '锚点E2E项目', '反向联动E2E', '对账E2E', '评论E2E项目', '上传E2E项目', '待删E2E项目', '取消删除E2E项目', '权限E2E项目', '工具区E2E项目', '揭示流水线E2E', '协作E2E项目', '整屏E2E项目', '联动恢复E2E', '大纲E2E项目', '大纲无标题E2E'])
     | Project.name.startswith('同步E2E-')
+    | Project.name.startswith('独锚-')
+    | Project.name.startswith('多锚-')
+    | Project.name.startswith('内跳-')
+    | Project.name.startswith('存储E2E-')
+    | Project.name.startswith('超管删除-')
 ))
+# ↑ 新增 E2E spec 的建场项目名必须同步加进本清单（toc.spec 曾因漏加
+#   '大纲E2E项目' 残留 → 二次跑 smoke 触发 project_id slug UNIQUE 撞库）
 e2e_ids = [p.id for p in e2e_projects]
 if e2e_ids:
     nc = Comment.delete().where(Comment.project << e2e_ids).execute()
@@ -104,5 +114,16 @@ fi
 echo "[smoke] 运行 Playwright..."
 cd tests
 [ -d node_modules ] || npm install --no-fund --no-audit --silent
-npx playwright install chromium 2>/dev/null | tail -1 || true
+# 浏览器缓存已在则跳过安装（沙箱实测：缓存目录 __dirlock 残留会让 install
+# 空等 20+ 分钟；缓存命中时 install 本也无事可做）
+if ls "$HOME/Library/Caches/ms-playwright"/chromium*-* >/dev/null 2>&1 \
+   || ls "$HOME/.cache/ms-playwright"/chromium*-* >/dev/null 2>&1; then
+  echo "[smoke] chromium 已缓存，跳过 playwright install"
+else
+  if [ -x ./node_modules/.bin/playwright ]; then
+    ./node_modules/.bin/playwright install chromium 2>/dev/null | tail -1 || true
+  else
+    npx playwright install chromium 2>/dev/null | tail -1 || true
+  fi
+fi
 npm run smoke

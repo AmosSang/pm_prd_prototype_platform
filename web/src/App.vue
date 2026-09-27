@@ -18,7 +18,8 @@ async function onLogout() {
         产品方案展示平台
       </span>
       <span class="spacer" />
-      <router-link v-if="currentUser.is_admin" class="admin-link" data-testid="user-manage" to="/users">
+      <router-link class="nav-link" data-testid="agent-connect" to="/agent">Agent 接入</router-link>
+      <router-link v-if="currentUser.is_admin" class="nav-link" data-testid="user-manage" to="/users">
         用户管理
       </router-link>
       <span class="user" data-testid="current-user">{{ currentUser.name }}（{{ currentUser.email }}）</span>
@@ -62,6 +63,6 @@ async function onLogout() {
 .user { color: var(--pp-text-3); }
 .logout { color: var(--pp-primary); cursor: pointer; }
 .logout:hover { color: var(--pp-primary-hover); }
-.admin-link { color: var(--pp-text-2); text-decoration: none; }
-.admin-link:hover { color: var(--pp-primary); }
+.nav-link { color: var(--pp-text-2); text-decoration: none; }
+.nav-link:hover { color: var(--pp-primary); }
 </style>

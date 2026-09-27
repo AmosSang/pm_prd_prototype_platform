@@ -34,6 +34,12 @@ const router = createRouter({
       component: () => import('../views/UserManage.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      // T12.2 Agent 接入（MCP）：任意登录用户管理自己的 Token
+      path: '/agent',
+      name: 'agent',
+      component: () => import('../views/AgentConnect.vue'),
+    },
   ],
 })
 
