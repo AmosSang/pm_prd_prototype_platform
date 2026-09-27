@@ -6,6 +6,8 @@
 - T4.2: comments（评论展示缓存，事实源为项目目录 reviews/）
 - T8.1（去 Git 本地化）：projects 去 git 字段、加 creator_id 与
   content_updated_at；git_tasks 表删除（落仓队列随 git 链路移除）
+- T9.1: project_members（协作者）
+- T12.1: api_tokens（MCP Agent 接入 Token，明文不落库）
 """
 import datetime as dt
 import os
@@ -97,6 +99,26 @@ class ProjectMember(BaseModel):
     created_at = peewee.CharField(default=utcnow_str)
 
 
+class ApiToken(BaseModel):
+    """API Token（T12.1，PRD §5.2 / AGENTS.md §4.4）。
+
+    Token 明文 = `ppp_` + 32 字节随机 hex（secrets.token_hex），仅生成时
+    返回一次，不落库、不进日志（有单测断言）；库中只存 SHA-256 哈希。
+    权限 = 绑定用户的网页端权限（含协作者判定）；撤销即时生效（逐请求
+    校验 revoked）；单 token 限流 60 次/分钟（auth.bearer_limiter）。
+    """
+
+    id = peewee.AutoField(primary_key=True)
+    user = peewee.ForeignKeyField(User, backref="api_tokens", null=False)
+    # SHA-256 hex（对完整明文串含 ppp_ 前缀求哈希）
+    token_hash = peewee.CharField(unique=True, null=False)
+    name = peewee.CharField(null=False)  # 用途备注（如 workbuddy-agent）
+    revoked = peewee.BooleanField(default=False)
+    created_at = peewee.CharField(default=utcnow_str)
+    # 最近一次经该 token 认证成功的时间（写库节流 ≥60s 一次）
+    last_used_at = peewee.CharField(null=True)
+
+
 class Comment(BaseModel):
     """评论（T4.2，展示缓存；事实源为项目目录 reviews/comments/*.json）。
 
@@ -133,7 +155,9 @@ def init_tables() -> None:
     os.makedirs(PROJECTS_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "shots"), exist_ok=True)
     db.connect(reuse_if_open=True)
-    db.create_tables([User, VerificationCode, Project, ProjectMember, Comment], safe=True)
+    db.create_tables(
+        [User, VerificationCode, Project, ProjectMember, ApiToken, Comment], safe=True
+    )
     _migrate()
     seed_admin()
 

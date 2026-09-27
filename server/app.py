@@ -15,6 +15,7 @@ from server.projects import bp as projects_bp
 from server.proto_proxy import bp as proto_proxy_bp
 from server.reviews import bp as reviews_bp
 from server.shots import bp as shots_bp
+from server.tokens import bp as tokens_bp
 from server.users import bp as users_bp
 
 
@@ -31,6 +32,7 @@ def create_app() -> Flask:
     app.register_blueprint(shots_bp)
     app.register_blueprint(reviews_bp)
     app.register_blueprint(users_bp)
+    app.register_blueprint(tokens_bp)
 
     init_tables()
 
@@ -41,11 +43,16 @@ def create_app() -> Flask:
     def require_login():
         from flask import request, session
 
+        from server.auth import try_bearer_auth
         from server.models import User
 
         p = request.path
         if p.startswith("/api/auth/") or p == "/api/health" or not p.startswith("/api/"):
             return None
+        # T12.1 Bearer 双轨：显式携带 Authorization: Bearer 时走 token 认证，
+        # 失败一律 401（不回退 session，防降级）；成功则身份注入 session 放行。
+        if request.headers.get("Authorization", "").startswith("Bearer "):
+            return try_bearer_auth()
         uid = session.get("uid")
         if not uid:
             return jsonify(code=401, msg="未登录"), 401

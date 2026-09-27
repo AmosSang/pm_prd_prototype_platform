@@ -1,4 +1,4 @@
-"""auth 蓝图：邮箱验证码登录（T2.1）。
+"""auth 蓝图：邮箱验证码登录（T2.1）+ Bearer 双轨认证（T12.1）。
 
 规则（技术方案 §2.9）：
 - 用户白名单：users 表由管理员维护，无自助注册；不在白名单的邮箱不发码
@@ -6,15 +6,30 @@
 - 频控：同邮箱 60s 内仅发 1 条（DB 时间戳校验）
 - SMTP：smtplib 同步发送，超时 5s；失败返回明确错误（码不落库）
 - 登录态：Flask session（签名 cookie），HttpOnly + SameSite=Lax，30 天
+
+T12.1 Bearer 双轨（PRD §5.2 / AGENTS.md §4.4）：
+- Token 明文 `ppp_` + 32 字节随机 hex，仅生成时返回一次，不落库不进日志
+- Authorization: Bearer ppp_xxx 与 session 双轨；Bearer 仅 /api/ 生效；
+  显式携带 Bearer 时认证失败一律 401，不回退 session（防降级）
+- 认证成功：身份注入 session（与登录等价，既有接口零改动），但响应
+  不回种 session cookie（_BearerAwareSessionInterface）——客户端拿不到
+  可复用登录态，Token 撤销即时生效不被绕过
+- 单 token 进程内限流 60 次/分钟，超限 429
 """
 import datetime as dt
+import hashlib
 import os
 import random
 import re
+import secrets
 import smtplib
+import threading
+import time
+from collections import deque
 from email.mime.text import MIMEText
 
 from flask import Blueprint, jsonify, request, session
+from flask.sessions import SecureCookieSessionInterface
 
 from server.config import (
     PLATFORM_SECRET,
@@ -25,7 +40,7 @@ from server.config import (
     SMTP_USE_SSL,
     SMTP_USER,
 )
-from server.models import User, VerificationCode, parse_utc, utcnow_str
+from server.models import ApiToken, User, VerificationCode, parse_utc, utcnow_str
 
 
 def email_file_name(email: str) -> str:
@@ -217,6 +232,130 @@ def me():
     ), 200
 
 
+# ─── Bearer 双轨认证（T12.1）─────────────────────────────────────────
+
+TOKEN_PREFIX = "ppp_"
+TOKEN_RANDOM_BYTES = 32            # 32 字节 → 64 hex 字符
+BEARER_RATE_LIMIT = 60             # 单 token 限流：60 次
+BEARER_RATE_WINDOW_SECONDS = 60    # 限流窗口：60 秒
+LAST_USED_FLUSH_SECONDS = 60       # last_used_at 写库节流间隔
+
+
+def generate_token_plaintext() -> str:
+    """生成 Token 明文：`ppp_` + 32 字节随机 hex。
+
+    仅在生成接口响应中返回一次；调用方（tokens API）不写日志、不落库，
+    库中只存 hash_token(plaintext)（有单测断言）。
+    """
+    return TOKEN_PREFIX + secrets.token_hex(TOKEN_RANDOM_BYTES)
+
+
+def hash_token(plaintext: str) -> str:
+    """Token 明文 → SHA-256 hex（含 ppp_ 前缀整体求哈希）。"""
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+class SlidingWindowLimiter:
+    """进程内滑动窗口限流（线程安全）。
+
+    单 token 60 次/分钟；多 worker 部署时为每进程独立额度（内部工具可
+    接受，任务卡口径即「进程内限流」）。
+    """
+
+    def __init__(self, limit: int = BEARER_RATE_LIMIT, window: int = BEARER_RATE_WINDOW_SECONDS):
+        self.limit = limit
+        self.window = window
+        self._hits: dict[int, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: int) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            dq = self._hits.setdefault(key, deque())
+            while dq and now - dq[0] > self.window:
+                dq.popleft()
+            if len(dq) >= self.limit:
+                return False
+            dq.append(now)
+            return True
+
+    def reset(self) -> None:
+        """清空窗口（测试隔离用）。"""
+        with self._lock:
+            self._hits.clear()
+
+
+bearer_limiter = SlidingWindowLimiter()
+
+
+def try_bearer_auth():
+    """Bearer 认证（T12.1）。仅对 /api/ 路径由 app.require_login 调用。
+
+    返回 None = 认证成功（身份已注入 session，请求放行）；否则返回
+    (错误响应, status)——显式携带 Bearer 时失败一律拒绝，不回退 session。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[len("Bearer "):].strip()
+    if not token.startswith(TOKEN_PREFIX):
+        return _err("无效的 Authorization 头（需 Bearer ppp_xxx）", 401)
+
+    rec = ApiToken.get_or_none(ApiToken.token_hash == hash_token(token))
+    if rec is None:
+        return _err("Token 无效", 401)
+    if rec.revoked:
+        return _err("Token 已撤销", 401)
+
+    user = User.get_or_none(User.id == rec.user_id)
+    if user is None:
+        return _err("Token 绑定用户不存在", 401)
+    if user.disabled:
+        return _err("账号已停用，请联系管理员", 401)
+
+    if not bearer_limiter.allow(rec.id):
+        return _err("请求过于频繁（Token 限流 60 次/分钟），请稍后重试", 429)
+
+    # 身份注入：与 session 登录等价（uid/email/name/is_admin 全量），
+    # 既有接口 session.get(...) 零改动即可读到正确身份。
+    session["uid"] = user.id
+    session["email"] = user.email
+    session["name"] = user.name
+    session["is_admin"] = user.is_admin
+
+    # last_used_at 写库节流：距上次更新 ≥60s 才写（高频下避免写放大）
+    now = utcnow_str()
+    if rec.last_used_at is None or (
+        parse_utc(now) - parse_utc(rec.last_used_at)
+    ).total_seconds() >= LAST_USED_FLUSH_SECONDS:
+        rec.last_used_at = now
+        rec.save()
+    return None
+
+
+class _BearerAwareSessionInterface(SecureCookieSessionInterface):
+    """Bearer 请求不回种 session cookie（T12.1）。
+
+    Bearer 认证虽把身份写入 session（等价注入，既有接口零改动），但绝不
+    向客户端下发签名 cookie——Agent 客户端（httpx 等）不会因此获得可复用
+    的登录态，Token 撤销后无法靠残留 cookie 继续访问（撤销即时生效）。
+
+    判据 = Authorization 头本身（无跨请求状态）：不要用 g 之类的请求间
+    标志——Flask 在已激活的同 app context 内发请求（如测试 fixture 或
+    CLI 脚本）会复用外层 context，g 上的标志会残留泄漏。
+    """
+
+    def save_session(self, app, session, response):  # noqa: A002 — Flask 签名
+        p = request.path
+        is_bearer_request = (
+            p.startswith("/api/")
+            and not p.startswith("/api/auth/")
+            and p != "/api/health"
+            and request.headers.get("Authorization", "").startswith("Bearer ")
+        )
+        if is_bearer_request:
+            return
+        super().save_session(app, session, response)
+
+
 def apply_auth_to_app(app):
     """注入 session 配置（应用工厂调用）。"""
     app.secret_key = PLATFORM_SECRET
@@ -225,3 +364,5 @@ def apply_auth_to_app(app):
     app.config["PERMANENT_SESSION_LIFETIME"] = dt.timedelta(days=SESSION_TTL_DAYS)
     # 开发期 Vite :8080 与 Flask :8081 跨端口，session cookie 需携带
     app.config["SESSION_COOKIE_NAME"] = "pp_session"
+    # T12.1：Bearer 感知的 session interface（Bearer 响应不回种 cookie）
+    app.session_interface = _BearerAwareSessionInterface()
