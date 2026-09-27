@@ -22,6 +22,7 @@ services:
   # T12.3：MCP Server（FastMCP streamable-http，同镜像不同入口）。
   # 工具经 compose 网络回环调 server（服务名解析）；生产由 Nginx /mcp 反代
   # 本服务 8082（HTTPS 硬前置，T12.5）。
+  # T12.4：挂同一数据卷——上传审计日志落 /data/logs/mcp-ops.jsonl。
   mcp:
     build:
       context: .
@@ -31,8 +32,13 @@ services:
       - PPP_API_BASE=http://server:8081
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8082
+      - DATA_DIR=/data
+      # base64 大参数上传（SDK 默认 4MiB 不够用，见 docs/poc-report-mcp-upload.md）
+      - MCP_MAX_REQUEST_BODY_BYTES=167772160
     ports:
       - "8082:8082"
+    volumes:
+      - server-data:/data
     depends_on:
       - server
     restart: unless-stopped

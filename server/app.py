@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.auth import apply_auth_to_app
 from server.auth import bp as auth_bp
 from server.config import PROTO_ZIP_MAX_BYTES
+from server.me import bp as me_bp
 from server.models import init_tables
 from server.projects import bp as projects_bp
 from server.proto_proxy import bp as proto_proxy_bp
@@ -33,6 +34,7 @@ def create_app() -> Flask:
     app.register_blueprint(reviews_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(tokens_bp)
+    app.register_blueprint(me_bp)
 
     init_tables()
 

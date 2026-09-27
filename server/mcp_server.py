@@ -1,4 +1,4 @@
-"""MCP Server（T12.3）：FastMCP 壳 + 只读五工具（PRD §5.2 / AGENTS.md §7）。
+"""MCP Server（T12.3 只读五工具 / T12.4 上传二工具，PRD §5.2 / AGENTS.md §7）。
 
 架构：
 - 独立进程，streamable-http transport（compose 内 :8082），经 Nginx ``/mcp``
@@ -6,6 +6,9 @@
   Agent 请求头里的 ``Authorization: Bearer ppp_...``（权限 = 绑定用户）。
 - 工具保持原子粒度（一个工具做一件事），自然语言到工具的组合交给 Agent
   对话层；使用引导集中在 instructions 与工具描述里。
+- 上传类工具：文件内容以 base64 入参（Agent 本机读文件），工具内转 multipart
+  回环调 Flask 既有上传接口——覆盖语义/安全校验全链路复用（T12.4 POC 结论
+  见 docs/poc-report-mcp-upload.md）；操作写审计日志 data/logs/mcp-ops.jsonl。
 
 约定：
 - 返回一律结构化 JSON；错误统一 ``{error_code, message, hint}`` 三段式
@@ -22,11 +25,19 @@
 环境变量：
 - ``PPP_API_BASE``：Flask 回环地址（默认 http://127.0.0.1:8081；compose 用 http://server:8081）
 - ``MCP_HOST`` / ``MCP_PORT``：MCP 监听（默认 0.0.0.0:8082）
+- ``MCP_MAX_REQUEST_BODY_BYTES``：streamable-http 请求体上限（默认 160 MiB，
+  覆盖 base64 大参数上传；SDK 默认 4 MiB 不够用，见 T12.4 POC 报告）
+- ``DATA_DIR``：审计日志落盘根（默认与 Flask 共用，compose 内同为 /data）
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
+import re
 import sys
+import time
 
 # 支持 `python server/mcp_server.py` 直接运行（platform/ 根加入 sys.path）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,9 +45,43 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastmcp import FastMCP  # noqa: E402
 from fastmcp.server.dependencies import get_http_headers  # noqa: E402
 
-from server.mcp_loopback import ApiResult, call_api  # noqa: E402
+from server.config import DATA_DIR, PRD_MAX_BYTES, PROTO_ZIP_MAX_BYTES  # noqa: E402
+from server.mcp_loopback import UPLOAD_TIMEOUT, ApiResult, call_api  # noqa: E402
 
 STATUSES = ("待确认", "已确认待修改", "已修改", "忽略", "延后再改")
+
+# ─── HTTP 请求体上限补丁（T12.4 POC 结论）────────────────────────────
+# FastMCP 3.4.7 未透出 streamable-http 的请求体上限，底层 mcp SDK 默认
+# 4 MiB（4194304）——base64 大参数（原型 zip）连 5MB 级文件都会被 413
+# 秒拒（POC 实测，见 docs/poc-report-mcp-upload.md）。这里在构造 session
+# manager 时注入可配置上限；默认 160 MiB 覆盖「100MB zip → ~134MB base64」
+# 的 Flask 侧全量程。⚠️ fastmcp 升级需回归本补丁（依赖其 http 模块的内部
+# 构造点与基类签名）。
+import fastmcp.server.http as _fm_http  # noqa: E402
+from mcp.server.streamable_http_manager import (  # noqa: E402
+    StreamableHTTPSessionManager as _SdkSessionManager,
+)
+
+MCP_MAX_REQUEST_BODY_BYTES = int(
+    os.environ.get("MCP_MAX_REQUEST_BODY_BYTES", str(160 * 1024 * 1024))
+)
+
+
+class _BigBodySessionManager(_fm_http.FastMCPStreamableHTTPSessionManager):
+    """注入请求体上限的 session manager（替代 FastMCP 原构造点）。
+
+    FastMCP 子类 __init__ 不接受 body 上限参数，无法直接 super() 透传——
+    这里复刻其自身初始化（仅 `_shared_event_store` 一条状态，属性实现
+    继承自原类），直接调 SDK 基类并带上上限。
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._shared_event_store = None
+        kwargs.setdefault("max_request_body_size", MCP_MAX_REQUEST_BODY_BYTES)
+        _SdkSessionManager.__init__(self, *args, **kwargs)
+
+
+_fm_http.FastMCPStreamableHTTPSessionManager = _BigBodySessionManager
 
 MCP_INSTRUCTIONS = """本服务是「产品方案展示平台」的 MCP 接入：让 AI 以你的平台账号身份读取项目资料
 （只读工具：项目列表 / 项目概览 / 全部评论 / PRD 原文 / 锚点对账）。
@@ -56,6 +101,19 @@ MCP_INSTRUCTIONS = """本服务是「产品方案展示平台」的 MCP 接入�
   （默认全部；可带 status 参数按状态筛选。拿到评论后建议按 comment-revision-plan
   工作流逐条梳理：定位段落/元素、判断 PRD 与原型联动、产出修改计划）
 - 「看看 XX 项目的 PRD / 整体情况 / 对账」→ get_prd_content / get_project_overview / get_reconcile
+- 「把 {目录} 的最新原型传到 {项目}」→ ① 读本机 zip 文件并转 base64；
+  ② upload_prototype（需要创建者/协作者权限）。**上传即覆盖旧版本**，
+  调用前必须向用户复述确认。
+- 「更新 XX 项目的 PRD 文档」→ upload_prd（同样为覆盖语义，先复述确认）
+
+## 上传覆盖语义（重要）
+- upload_prototype / upload_prd 都是**上传即覆盖**：成功即替换旧版本，
+  旧版本不保留、不可恢复。调用前先向用户复述「目标项目 + 将覆盖现有版本」并得到确认。
+- 文件内容以 base64 传入（Agent 需先读取本机文件）。大小上限：原型 zip ≤100MB、
+  PRD ≤5MB；**超限时请求会在传输层被拒（HTTP 413，非结构化错误）**，
+  请在调用前预检文件大小，超限时告知用户先压缩。
+- 安全校验失败（zip 结构异常/路径穿越/解压炸弹/软链等）时返回结构化错误，
+  且**旧版本完好**——可放心提示用户修复后重试。
 
 ## 项目匹配与确认
 - 所有带 project 参数的工具：按 slug 精确 → 名称精确 → 名称包含依次匹配。
@@ -199,6 +257,73 @@ def _comment_item(c: dict) -> dict:
     return item
 
 
+# ─── 上传辅助（T12.4）────────────────────────────────────────────────
+
+def _audit(tool: str, bearer: str | None, project_slug: str, size: int | None, ok: bool, error_code: str | None = None) -> None:
+    """上传操作审计（data/logs/mcp-ops.jsonl：时间/用户/项目/工具/文件大小）。
+
+    best-effort：审计失败不阻断主流程（stderr 提示即可）。
+    用户身份经 /api/me 回环获取（Bearer 双轨认证，与网页端同一账号）。
+    路径按 DATA_DIR 调用时计算（测试可 monkeypatch 注入临时目录）。
+    """
+    try:
+        me = call_api("GET", "/api/me", bearer)
+        user = str(((me.data or {}) if me.ok else {}).get("email") or "")
+        line = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "user": user,
+            "project": project_slug,
+            "tool": tool,
+            "file_size": size,
+            "ok": ok,
+        }
+        if error_code:
+            line["error_code"] = error_code
+        log_path = os.path.join(DATA_DIR, "logs", "mcp-ops.jsonl")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 —— 审计不阻断主流程
+        print(f"[mcp] audit log failed: {e}", file=sys.stderr)
+
+
+def _decode_base64(file_base64: str, limit: int) -> tuple[bytes | None, dict | None]:
+    """base64 入参 → bytes（含大小预检与友好错误）。
+
+    先按 base64 膨胀率预估大小、超限不开解码（省内存）；容忍换行/空白
+    （macOS `base64` 输出默认折行）；非法编码给可操作提示。
+    """
+    s = re.sub(r"\s+", "", str(file_base64 or ""))
+    if not s:
+        return None, _err(
+            "bad_request", "文件内容（base64）不能为空",
+            "请先读取本机文件并做 base64 编码后传入（如 `base64 -i prototype.zip`）",
+        )
+    est = len(s) * 3 // 4
+    if est > limit + 1024:
+        return None, _err(
+            "too_large",
+            f"文件约 {est // (1024 * 1024)}MB，超过 {limit // (1024 * 1024)}MB 上限",
+            "请先压缩文件再重试（平台原型 zip 上限 100MB、PRD 上限 5MB）",
+        )
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        return None, _err(
+            "bad_request", "file_base64 不是合法的 base64 内容",
+            "请确认传入的是文件原文的 base64 编码（可用 `base64 -i 文件` 生成）",
+        )
+    if not raw:
+        return None, _err("bad_request", "解码后文件为空", "请确认源文件有内容后重试")
+    if len(raw) > limit:
+        return None, _err(
+            "too_large",
+            f"文件 {len(raw) // (1024 * 1024)}MB 超过 {limit // (1024 * 1024)}MB 上限",
+            "请先压缩文件再重试",
+        )
+    return raw, None
+
+
 # ─── 只读五工具（T12.3）──────────────────────────────────────────────
 
 @mcp.tool(name="list_projects")
@@ -312,6 +437,82 @@ def get_reconcile(project: str) -> dict:
     if not r.ok:
         return _map_api_error(r, action="获取对账明细")
     return {"project": _project_row(p), **(r.data or {})}
+
+
+# ─── 上传二工具（T12.4）──────────────────────────────────────────────
+
+@mcp.tool(name="upload_prototype")
+def upload_prototype(project: str, file_base64: str, file_name: str = "prototype.zip") -> dict:
+    """上传原型 zip 到项目——**上传即覆盖旧版本（不可恢复），调用前必须向用户复述确认**。
+
+    project：项目 slug（project_id）或名称；模糊匹配多命中返回候选，需先确认。
+    file_base64：原型 zip 文件内容的 base64 编码（文件在用户本机，Agent 先读取
+      再传入；可含换行）。大小上限 100MB（base64 约 134MB）——超限会在传输层
+      被拒（HTTP 413），请先预检文件大小。
+    file_name：可选展示文件名。
+
+    权限：需要创建者或协作者身份。zip 安全校验（路径穿越/解压总量/条目数/
+    软链）失败时返回错误且**旧版本完好**；通过后原子替换，对账自动重算。
+    """
+    bearer = _bearer()
+    # 解码/大小预检放最前（大文件快速失败，不做无谓回环）
+    raw, err = _decode_base64(file_base64, PROTO_ZIP_MAX_BYTES)
+    if err:
+        _audit("upload_prototype", bearer, str(project or ""), None, ok=False, error_code=str(err.get("error_code")))
+        return err
+    p, err = _resolve_project(project, bearer)
+    if err:
+        return err
+    files = {"zip": (file_name or "prototype.zip", raw, "application/zip")}
+    r = call_api("POST", f"/api/projects/{p['id']}/prototype", bearer, files=files, timeout=UPLOAD_TIMEOUT)
+    if not r.ok:
+        mapped = _map_api_error(r, action="上传原型")
+        _audit("upload_prototype", bearer, str(p.get("project_id")), len(raw), ok=False, error_code=str(mapped.get("error_code")))
+        return mapped
+    _audit("upload_prototype", bearer, str(p.get("project_id")), len(raw), ok=True)
+    d = r.data or {}
+    return {
+        "project": _project_row(d if d.get("project_id") else p),
+        "file_size": len(raw),
+        "note": "已覆盖旧版本原型，查看器立即可见新版本",
+    }
+
+
+@mcp.tool(name="upload_prd")
+def upload_prd(project: str, file_base64: str, file_name: str = "PRD.md") -> dict:
+    """上传 PRD markdown 文档到项目——**上传即替换旧文档，调用前必须向用户复述确认**。
+
+    project：项目 slug（project_id）或名称；模糊匹配多命中返回候选，需先确认。
+    file_base64：markdown 文件内容的 base64 编码。大小上限 5MB。
+    file_name：编译文件名，需以 .md 结尾（平台按该名保存）。
+
+    权限：需要创建者或协作者身份；成功即替换 prd/ 下的旧文档（唯一一份约定）。
+    """
+    bearer = _bearer()
+    name = (file_name or "").strip() or "PRD.md"
+    if not name.lower().endswith(".md"):
+        return _err("bad_request", "PRD 文件名需以 .md 结尾", "请提供 .md 文件名（如 需求文档.md）")
+    raw, err = _decode_base64(file_base64, PRD_MAX_BYTES)
+    if err:
+        _audit("upload_prd", bearer, str(project or ""), None, ok=False, error_code=str(err.get("error_code")))
+        return err
+    p, err = _resolve_project(project, bearer)
+    if err:
+        return err
+    files = {"file": (os.path.basename(name), raw, "text/markdown")}
+    r = call_api("POST", f"/api/projects/{p['id']}/prd", bearer, files=files, timeout=UPLOAD_TIMEOUT)
+    if not r.ok:
+        mapped = _map_api_error(r, action="上传 PRD")
+        _audit("upload_prd", bearer, str(p.get("project_id")), len(raw), ok=False, error_code=str(mapped.get("error_code")))
+        return mapped
+    _audit("upload_prd", bearer, str(p.get("project_id")), len(raw), ok=True)
+    d = r.data or {}
+    return {
+        "project": _project_row(d if d.get("project_id") else p),
+        "file_name": os.path.basename(name),
+        "file_size": len(raw),
+        "note": "已替换旧 PRD 文档",
+    }
 
 
 def main() -> None:

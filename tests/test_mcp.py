@@ -1,13 +1,18 @@
-"""T12.3 MCP Server 单测 + 集成测试。
+"""T12.3/T12.4 MCP Server 单测 + 集成测试。
 
 单测（mock 回环）：项目匹配规则（slug 精确 > 名称精确 > 名称包含 / 多命中候选 /
-未命中提示）、错误映射三段式、出参整形（角色映射 / 评论同构覆盖 / no_prd）。
+未命中提示）、错误映射三段式、出参整形（角色映射 / 评论同构覆盖 / no_prd）、
+上传工具（base64 解码预检 / 审计日志 / 覆盖语义出参）。
 集成测试（测试客户端直连）：FastMCP 内存 Client → 工具 → 回环 httpx transport
 → Flask test_client（真实路由 + Bearer 认证 + DB/文件全链路）。
 """
 import asyncio
+import base64 as b64
+import io
+import json
 import os
 import sys
+import zipfile
 
 import httpx
 import pytest
@@ -20,6 +25,7 @@ from fastmcp import Client  # noqa: E402
 
 import server.mcp_loopback as loopback  # noqa: E402
 import server.mcp_server as mcp_server  # noqa: E402
+from server import storage  # noqa: E402
 from server.app import create_app  # noqa: E402
 from server.mcp_loopback import ApiResult  # noqa: E402
 from server.models import Project, User, db, init_tables  # noqa: E402
@@ -252,7 +258,7 @@ def _auth(env):
 
 
 class Test集成直连:
-    def test_工具清单_五个只读(self, env, monkeypatch):
+    def test_工具清单_七工具(self, env, monkeypatch):
         monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {_auth(env)}"})
 
         async def go():
@@ -262,7 +268,8 @@ class Test集成直连:
         tools = asyncio.run(go())
         names = sorted(t.name for t in tools)
         assert names == [
-            "get_all_comments", "get_prd_content", "get_project_overview", "get_reconcile", "list_projects",
+            "get_all_comments", "get_prd_content", "get_project_overview", "get_reconcile",
+            "list_projects", "upload_prd", "upload_prototype",
         ]
         # instructions 已配置（概念速览 + 意图映射）
         assert "概念速览" in mcp_server.MCP_INSTRUCTIONS
@@ -340,3 +347,176 @@ class Test集成直连:
         assert out["projects"][0]["my_role"] == "参与者"
         out = _call("get_all_comments", {"project": "mcp-proj"}).data
         assert out["count"] == 1  # 与网页评论列表可见性一致（登录用户可见）
+
+
+# ───────────────────── T12.4 上传工具：单测（mock 回环）─────────────────────
+
+def _read_audit(tmp_path) -> list:
+    path = os.path.join(str(tmp_path / "audit"), "logs", "mcp-ops.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+class Testbase64解码:
+    def test_正常解码(self):
+        raw = os.urandom(1000)
+        got, err = mcp_server._decode_base64(b64.b64encode(raw).decode(), 10_000)
+        assert err is None and got == raw
+
+    def test_容忍折行与空白(self):
+        raw = os.urandom(1000)
+        s = b64.b64encode(raw).decode()
+        folded = "\n".join(s[i:i + 76] for i in range(0, len(s), 76)) + "\n"
+        got, err = mcp_server._decode_base64(folded, 10_000)
+        assert err is None and got == raw
+
+    def test_非法编码(self):
+        got, err = mcp_server._decode_base64("!!!not-base64!!!", 10_000)
+        assert got is None and err["error_code"] == "bad_request"
+
+    def test_空内容(self):
+        got, err = mcp_server._decode_base64("  \n ", 10_000)
+        assert got is None and err["error_code"] == "bad_request"
+
+    def test_超限预检_不解码(self):
+        s = b64.b64encode(os.urandom(2000)).decode()
+        got, err = mcp_server._decode_base64(s, 1000)
+        assert got is None and err["error_code"] == "too_large"
+
+
+class Test上传工具单测:
+    def test_upload_prototype_成功与审计(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("POST", "/api/projects/11/prototype"): _ok(_rows()[0]),
+            ("GET", "/api/me"): _ok({"id": 1, "email": "a@x.com", "name": "甲"}),
+        }
+        _fake_loopback(monkeypatch, routes)
+        payload = b"dummy-zip-bytes"
+        out = mcp_server.upload_prototype("login-a1b2c3", b64.b64encode(payload).decode(), "p.zip")
+        assert out["file_size"] == len(payload)
+        assert "覆盖" in out["note"]
+        audit = _read_audit(tmp_path)
+        assert len(audit) == 1
+        assert audit[0]["tool"] == "upload_prototype" and audit[0]["ok"] is True
+        assert audit[0]["user"] == "a@x.com" and audit[0]["project"] == "login-a1b2c3"
+        assert audit[0]["file_size"] == len(payload)
+
+    def test_upload_prototype_权限拒绝映射与审计(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("POST", "/api/projects/11/prototype"): ApiResult(403, {"code": 403, "msg": "仅管理者可上传原型（创建者或协作者）"}),
+            ("GET", "/api/me"): _ok({"id": 3, "email": "c@x.com", "name": "丙"}),
+        }
+        _fake_loopback(monkeypatch, routes)
+        out = mcp_server.upload_prototype("login-a1b2c3", b64.b64encode(b"x").decode())
+        assert out["error_code"] == "no_permission"
+        audit = _read_audit(tmp_path)
+        assert len(audit) == 1 and audit[0]["ok"] is False and audit[0]["error_code"] == "no_permission"
+
+    def test_upload_prd_文件名校验(self, monkeypatch, tmp_path):
+        calls = _fake_loopback(monkeypatch, {})
+        out = mcp_server.upload_prd("login-a1b2c3", b64.b64encode(b"# doc").decode(), "x.txt")
+        assert out["error_code"] == "bad_request"
+        assert len(calls) == 0  # 未发起任何回环调用
+
+    def test_upload_prd_成功(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("POST", "/api/projects/11/prd"): _ok(_rows()[0]),
+            ("GET", "/api/me"): _ok({"id": 1, "email": "a@x.com", "name": "甲"}),
+        }
+        calls = _fake_loopback(monkeypatch, routes)
+        content = "# 需求\n\n内容".encode()
+        out = mcp_server.upload_prd("login-a1b2c3", b64.b64encode(content).decode(), "需求.md")
+        assert out["file_name"] == "需求.md" and out["file_size"] == len(content)
+        post = [c for c in calls if c[0] == "POST"]
+        assert post and post[0][3]["files"]["file"][0] == "需求.md"
+
+
+# ───────────────────── T12.4 上传工具：集成（测试客户端直连）─────────────────
+
+def _zip_bytes(files: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+class Test上传集成直连:
+    def test_上传原型全链路_文件替换与审计(self, env, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {_auth(env)}"})
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        zip_bytes = _zip_bytes({"index.html": "<html><body>新版原型内容</body></html>"})
+        out = _call("upload_prototype", {
+            "project": "mcp-proj",
+            "file_base64": b64.b64encode(zip_bytes).decode(),
+            "file_name": "new.zip",
+        }).data
+        assert out["file_size"] == len(zip_bytes)
+        assert "覆盖" in out["note"]
+        # 文件已原子替换（查看器口径：新内容就位）
+        root = os.path.join(str(storage.PROJECTS_DIR), "mcp-proj")
+        with open(os.path.join(root, "prototype", "index.html"), encoding="utf-8") as f:
+            assert "新版原型内容" in f.read()
+        # 审计日志（时间/用户/项目/工具/文件大小）
+        audit = _read_audit(tmp_path)
+        assert len(audit) == 1
+        line = audit[0]
+        assert line["user"] == "pm@corp.com"
+        assert line["project"] == "mcp-proj"
+        assert line["tool"] == "upload_prototype"
+        assert line["file_size"] == len(zip_bytes)
+        assert line["ok"] is True and line["ts"]
+
+    def test_上传PRD全链路_替换与可见(self, env, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {_auth(env)}"})
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        content = "# 新需求文档\n\n全新内容。".encode()
+        out = _call("upload_prd", {
+            "project": "mcp-proj",
+            "file_base64": b64.b64encode(content).decode(),
+            "file_name": "新需求.md",
+        }).data
+        assert out["file_name"] == "新需求.md"
+        root = os.path.join(str(storage.PROJECTS_DIR), "mcp-proj")
+        assert os.listdir(os.path.join(root, "prd")) == ["新需求.md"]  # 旧文档被替换
+        got = _call("get_prd_content", {"project": "mcp-proj"}).data
+        assert got["file"] == "prd/新需求.md"
+        assert "全新内容" in got["content"]
+
+    def test_上传_非成员被拒_旧版完好(self, env, monkeypatch, tmp_path):
+        boot, client, _, _ = env
+        with client.session_transaction() as sess:
+            sess["uid"] = U_OTHER
+            sess["email"] = "other@corp.com"
+            sess["name"] = "路人甲"
+        res = client.post("/api/tokens", json={"name": "mcp-other-upload"})
+        pt_other = res.get_json()["data"]["plaintext"]
+        monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {pt_other}"})
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        zip_bytes = _zip_bytes({"index.html": "<html><body>越权内容</body></html>"})
+        out = _call("upload_prototype", {
+            "project": "mcp-proj",
+            "file_base64": b64.b64encode(zip_bytes).decode(),
+        }).data
+        assert out["error_code"] == "no_permission"
+        # 旧版本完好（未被替换）
+        root = os.path.join(str(storage.PROJECTS_DIR), "mcp-proj")
+        with open(os.path.join(root, "prototype", "index.html"), encoding="utf-8") as f:
+            text = f.read()
+        assert "data-pa" in text and "越权内容" not in text
+        audit = _read_audit(tmp_path)
+        assert audit and audit[-1]["ok"] is False
+
+    def test_api_me_Bearer可用(self, env, monkeypatch):
+        """审计取身份的接口：/api/me 在 Bearer 下返回绑定用户。"""
+        r = loopback.call_api("GET", "/api/me", _auth(env))
+        assert r.ok and r.data["email"] == "pm@corp.com"
+        assert r.data["name"] == "创建者桑"

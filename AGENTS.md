@@ -129,12 +129,22 @@ status 五态：待确认 / 已确认待修改 / 已修改 / 忽略 / 延后再�
 - FastMCP 进程回环调 Flask API（不直连 DB）；上传复用 Flask 安全校验全链路；MCP Server instructions 含平台概念速览与意图映射
 - 上传即覆盖旧版本——工具描述必须明示，Agent 应向用户复述确认
 
-> 实施状态（T12.3 已落地）：`server/mcp_server.py` 只读五工具 + instructions；
-> `server/mcp_loopback.py` 回环客户端（测试可注入 Flask test_client transport）；
-> 回环目标 `PPP_API_BASE`（默认 http://127.0.0.1:8081，compose 内 http://server:8081）；
-> 监听 `MCP_HOST`/`MCP_PORT`（默认 0.0.0.0:8082）。本地联调：先起 Flask，
-> 再 `server/.venv/bin/python server/mcp_server.py`。fastmcp 锁 3.4.7（requirements）。
-> `list_projects` 口径依赖 Flask `_project_public` 的 `comment_count`（T12.3 新增可选字段）。
+> 实施状态（T12.3 只读五工具 + T12.4 上传二工具，均已落地）：
+> - `server/mcp_server.py`：7 工具（list_projects / get_project_overview / get_all_comments /
+>   get_prd_content / get_reconcile / upload_prototype / upload_prd）+ instructions；
+>   `server/mcp_loopback.py`：回环客户端（测试可注入 Flask test_client transport）；
+> - 上传工具：文件内容以 **base64** 入参（文件在用户本机，Agent 读取后传入），
+>   **上传即覆盖旧版本**（工具描述与 instructions 均明示）；多命中候选/权限拒绝/
+>   超限均有结构化错误与 Agent 侧文案；
+> - **HTTP 请求体上限补丁**：FastMCP 3.4.7 未透出该参数、SDK 默认 4MiB（连 5MB zip 都
+>   413）——`mcp_server.py` 子类补丁注入 `MCP_MAX_REQUEST_BODY_BYTES`（默认 160 MiB）；
+>   ⚠️ fastmcp 升级需回归（requirements 锁 3.4.7）。POC 报告：`docs/poc-report-mcp-upload.md`；
+> - 上传审计：`data/logs/mcp-ops.jsonl`（时间/用户/项目/工具/文件大小/ok）；用户身份经
+>   **`GET /api/me`** 回环获取（普通 /api/ 前缀，Bearer 可用；`/api/auth/me` 仍是 session-only）；
+> - 回环目标 `PPP_API_BASE`（默认 http://127.0.0.1:8081，compose 内 http://server:8081）；
+>   监听 `MCP_HOST`/`MCP_PORT`（默认 0.0.0.0:8082）。本地联调：先起 Flask，
+>   再 `server/.venv/bin/python server/mcp_server.py`。
+> - `list_projects` 口径依赖 Flask `_project_public` 的 `comment_count`（T12.3 新增可选字段）。
 
 ## 8 阶段 9 改造面清单（T9.1 核对底稿，grep 核实于 2026-09-07）
 
