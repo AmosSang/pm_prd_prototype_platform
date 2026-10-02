@@ -258,7 +258,7 @@ def _auth(env):
 
 
 class Test集成直连:
-    def test_工具清单_七工具(self, env, monkeypatch):
+    def test_工具清单_八工具(self, env, monkeypatch):
         monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {_auth(env)}"})
 
         async def go():
@@ -268,8 +268,8 @@ class Test集成直连:
         tools = asyncio.run(go())
         names = sorted(t.name for t in tools)
         assert names == [
-            "get_all_comments", "get_prd_content", "get_project_overview", "get_reconcile",
-            "list_projects", "upload_prd", "upload_prototype",
+            "download_prototype", "get_all_comments", "get_prd_content", "get_project_overview",
+            "get_reconcile", "list_projects", "upload_prd", "upload_prototype",
         ]
         # instructions 已配置（概念速览 + 意图映射）
         assert "概念速览" in mcp_server.MCP_INSTRUCTIONS
@@ -520,3 +520,141 @@ class Test上传集成直连:
         r = loopback.call_api("GET", "/api/me", _auth(env))
         assert r.ok and r.data["email"] == "pm@corp.com"
         assert r.data["name"] == "创建者桑"
+
+
+# ───────────────────── T12.6 原型下载：单测（mock 回环）─────────────────────
+
+def _overview_with_proto() -> dict:
+    row = _rows()[0]
+    return {
+        "project": row,
+        "docs": ["prd/需求.md"],
+        "proto_entries": ["prototype/index.html", "prototype/pages/settings.html"],
+        "page_map": [],
+        "proto_anchor_index": {"page-login": "prototype/index.html"},
+        "reconcile_summary": None,
+    }
+
+
+class Test下载工具单测:
+    def test_出参与curl占位符(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("GET", "/api/projects/11/overview"): _ok(_overview_with_proto()),
+            ("GET", "/api/me"): _ok({"id": 1, "email": "a@x.com", "name": "甲"}),
+        }
+        _fake_loopback(monkeypatch, routes)
+        out = mcp_server.download_prototype("login-a1b2c3", base_url="https://plan.example.com/")
+        assert out["api_path"] == "/api/projects/11/prototype/export"
+        assert out["download_url"] == "https://plan.example.com/api/projects/11/prototype/export"
+        assert out["file_name"] == "login-a1b2c3-prototype.zip"
+        assert "<你的Token>" in out["curl"]  # 默认不回显凭证
+        assert "curl_ready" not in out
+        assert out["entry_count"] == 2
+        audit = _read_audit(tmp_path)
+        assert audit[-1]["tool"] == "download_prototype" and audit[-1]["ok"] is True
+
+    def test_include_token_回填可执行命令(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        monkeypatch.setattr(
+            mcp_server, "get_http_headers", lambda **kw: {"authorization": "Bearer ppp_secrettoken"}
+        )
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("GET", "/api/projects/11/overview"): _ok(_overview_with_proto()),
+            ("GET", "/api/me"): _ok({"id": 1, "email": "a@x.com", "name": "甲"}),
+        }
+        _fake_loopback(monkeypatch, routes)
+        out = mcp_server.download_prototype("login-a1b2c3", base_url="https://plan.example.com", include_token=True)
+        assert "Bearer ppp_secrettoken" in out["curl_ready"]
+        assert "login-a1b2c3-prototype.zip" in out["curl_ready"]
+
+    def test_空原型报prototype_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        empty = _overview_with_proto()
+        empty["proto_entries"] = []
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("GET", "/api/projects/11/overview"): _ok(empty),
+            ("GET", "/api/me"): _ok({"id": 1, "email": "a@x.com", "name": "甲"}),
+        }
+        _fake_loopback(monkeypatch, routes)
+        out = mcp_server.download_prototype("login-a1b2c3", base_url="https://plan.example.com")
+        assert out["error_code"] == "prototype_empty"
+        audit = _read_audit(tmp_path)
+        assert audit[-1]["ok"] is False and audit[-1]["error_code"] == "prototype_empty"
+
+    def test_无法确定基址时提示显式传入(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("PLATFORM_PUBLIC_ORIGIN", raising=False)
+        monkeypatch.setattr(mcp_server, "get_http_request", lambda: (_ for _ in ()).throw(RuntimeError("no request")))
+        routes = {
+            ("GET", "/api/projects"): _ok(_rows()),
+            ("GET", "/api/projects/11/overview"): _ok(_overview_with_proto()),
+        }
+        _fake_loopback(monkeypatch, routes)
+        out = mcp_server.download_prototype("login-a1b2c3")
+        assert out["error_code"] == "base_url_unknown"
+        assert "base_url" in out["hint"]
+
+    def test_平台基址优先级_env优先(self, monkeypatch):
+        monkeypatch.setenv("PLATFORM_PUBLIC_ORIGIN", "https://plan.example.com/")
+        assert mcp_server._platform_base() == "https://plan.example.com"
+
+    def test_平台基址回落请求host(self, monkeypatch):
+        monkeypatch.delenv("PLATFORM_PUBLIC_ORIGIN", raising=False)
+
+        class _Req:
+            headers = {"host": "plan.example.com"}
+            url = type("U", (), {"scheme": "https"})()
+
+        monkeypatch.setattr(mcp_server, "get_http_request", lambda: _Req())
+        assert mcp_server._platform_base() == "https://plan.example.com"
+
+
+# ───────────────────── T12.6 原型下载：集成（测试客户端直连）─────────────────
+
+class Test原型下载集成直连:
+    def test_导出端点_zip结构与内容(self, env):
+        """Flask 导出端点：包内保留 prototype/ 一层，内容与磁盘一致。"""
+        _boot, _client, transport_client, pt = env
+        res = transport_client.get(
+            "/api/projects/11/prototype/export",
+            headers={"Authorization": f"Bearer {pt}"},
+        )
+        assert res.status_code == 200
+        assert res.headers["Content-Type"] == "application/zip"
+        assert "mcp-proj-prototype.zip" in res.headers["Content-Disposition"]
+        zf = zipfile.ZipFile(io.BytesIO(res.data))
+        names = zf.namelist()
+        assert "mcp-proj-prototype/prototype/index.html" in names
+        html = zf.read("mcp-proj-prototype/prototype/index.html").decode()
+        assert 'data-pa="page-login"' in html
+
+    def test_导出端点_未登录401(self, env):
+        _boot, _client, transport_client, _pt = env
+        assert transport_client.get("/api/projects/11/prototype/export").status_code == 401
+
+    def test_导出端点_无原型内容410(self, env):
+        boot, _client, transport_client, pt = env
+        with boot.app_context():
+            Project.create(project_id="mcp-empty", name="空项目", creator_id=U_OWNER)
+        res = transport_client.get(
+            "/api/projects/12/prototype/export",
+            headers={"Authorization": f"Bearer {pt}"},
+        )
+        assert res.status_code == 410
+
+    def test_工具返回的地址可直接下载(self, env, monkeypatch, tmp_path):
+        """工具给出的 api_path + 当前 Token → 真的能下载到合法 zip（闭环可执行）。"""
+        monkeypatch.setattr(mcp_server, "get_http_headers", lambda **kw: {"authorization": f"Bearer {_auth(env)}"})
+        monkeypatch.setenv("PLATFORM_PUBLIC_ORIGIN", "http://127.0.0.1:8081")
+        monkeypatch.setattr(mcp_server, "DATA_DIR", str(tmp_path / "audit"))
+        out = _call("download_prototype", {"project": "mcp-proj"}).data
+        assert out["api_path"] == "/api/projects/11/prototype/export"
+        _boot, _client, transport_client, pt = env
+        res = transport_client.get(out["api_path"], headers={"Authorization": f"Bearer {pt}"})
+        assert res.status_code == 200
+        assert zipfile.ZipFile(io.BytesIO(res.data)).namelist() == [
+            "mcp-proj-prototype/prototype/index.html",
+        ]
