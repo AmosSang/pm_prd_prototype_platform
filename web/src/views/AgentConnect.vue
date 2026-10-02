@@ -28,7 +28,11 @@ function buildConfig(token: string): string {
     {
       mcpServers: {
         'product-plan-platform': {
-          type: 'http',
+          // transport 类型：WorkBuddy / CodeBuddy 客户端须用 streamableHttp；
+          // 部分客户端写作 "http"（同义，均为 Streamable HTTP）。
+          // 填错会握手失败：服务端要求 Accept: application/json, text/event-stream
+          // 的流式响应，裸 POST 返回 406。
+          type: 'streamableHttp',
           url: MCP_URL,
           headers: { Authorization: `Bearer ${token}` },
         },
@@ -187,7 +191,8 @@ onMounted(refresh)
       <p class="section-hint">
         把下面配置粘贴到 WorkBuddy 的 mcp.json（用户级 <code class="inline-code">~/.workbuddy/mcp.json</code>，
         或项目级 <code class="inline-code">&lt;项目&gt;/.workbuddy/mcp.json</code>），
-        将 <code class="inline-code">&lt;你的 Token&gt;</code> 替换为生成时显示的明文：
+        将 <code class="inline-code">&lt;你的 Token&gt;</code> 替换为生成时显示的明文；
+        保存后需在连接器管理页点「信任」才会激活。
       </p>
       <div class="code-block">
         <pre data-testid="agent-config-template">{{ configTemplate }}</pre>

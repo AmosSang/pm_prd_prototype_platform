@@ -405,7 +405,7 @@ server {
 {
   "mcpServers": {
     "product-plan-platform": {
-      "type": "http",
+      "type": "streamableHttp",
       "url": "https://your.domain/mcp",
       "headers": { "Authorization": "Bearer ppp_你的Token" }
     }
@@ -413,7 +413,10 @@ server {
 }
 ```
 
-保存后确认服务器状态 🟢（工具列表应可见 7 个：`list_projects` / `get_project_overview` / `get_all_comments` / `get_prd_content` / `get_reconcile` / `upload_prototype` / `upload_prd`）。
+> `type` 必须是 **`streamableHttp`**（部分客户端写作 `"http"`，同义）。填错会握手失败——服务端要求 `Accept: application/json, text/event-stream` 的流式响应，裸 POST 返回 **406**。
+> 保存后需在连接器管理页右上角「自定义连接器」入口点「信任」，才会激活。
+
+保存后确认服务器状态 🟢（工具列表应可见 8 个：`list_projects` / `get_project_overview` / `get_all_comments` / `get_prd_content` / `get_reconcile` / `upload_prototype` / `upload_prd` / `download_prototype`）。
 
 **③ 四场景联调**（勾选即验收通过）：
 
