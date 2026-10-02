@@ -47,6 +47,10 @@ PROTO_UNZIP_MAX_FILES = 5000               # 条目数上限
 PRD_MAX_BYTES = 5 * 1024 * 1024            # PRD markdown ≤ 5MB
 SHOT_MAX_BYTES = 10 * 1024 * 1024          # 截图 ≤ 10MB
 
+# 原型 zip 智能下钻的最大层数（T12.6）。export_prototype 导出的包是两层
+# 「<slug>-prototype/prototype/index.html」，只下钻一层会让「导出→上传」往返失败。
+PROTO_MAX_DESCEND = 3
+
 PLATFORM_SECRET = os.environ.get("PLATFORM_SECRET", "dev-secret-change-me")
 
 # 超级管理员邮箱（T2.1 增强）：初始启动时写入 users 表为超管（name=admin，is_admin=True）

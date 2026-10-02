@@ -405,6 +405,57 @@ class TestUploadAPI:
         # 临时目录不残留
         assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
 
+    def test_upload_prototype_descends_two_levels(self, app):
+        """T12.6 回归：export_prototype 导出的包是**两层**
+        「<slug>-prototype/prototype/index.html」，原先只下钻一层会报
+        「压缩包内未找到 HTML 页面」——导致「下载→改→上传」闭环在最后一步断掉。
+        此包即服务端自己 export_prototype 的产物，故须能原样传回。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "两层下钻项目")
+
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "slug-prototype/prototype/index.html": "<html><body>hi</body></html>",
+                "slug-prototype/prototype/auth.html": "<html>auth</html>",
+            })), "p.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        #落盘后 html 应在 prototype/ 顶层，两层壳都不应残留
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+        assert os.path.isfile(os.path.join(root, "prototype", "auth.html"))
+        assert not os.path.exists(os.path.join(root, "prototype", "slug-prototype"))
+        assert not os.path.exists(os.path.join(root, "prototype", "prototype"))
+        assert not os.path.exists(os.path.join(root, ".prototype-tmp"))
+
+    def test_upload_prototype_roundtrip_with_export(self, app):
+        """T12.6 回归闭环：export_prototype 导出的 zip 原样传回必须成功。
+        这是 download_prototype → 本机改 → upload_prototype 链路的最后一环，
+        若下钻层级不匹配则闭环断裂。"""
+        client, projects_dir = app
+        pid, root = self._make_project(client, projects_dir, "往返项目")
+
+        # 先放一个真实原型，再导出，再原样传回
+        assert client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(_zip_bytes({
+                "prototype/index.html": "<html><body>v1</body></html>",
+            })), "p.zip"),
+        }, content_type="multipart/form-data").status_code == 200
+
+        exported = client.get(f"/api/projects/{pid}/prototype/export")
+        assert exported.status_code == 200
+        blob = exported.data
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            names = zf.namelist()
+        # 导出形态即两层，这是断言前提
+        assert any(n.count("/") >= 2 and n.endswith(".html") for n in names), names
+
+        # 原样传回，必须 200（修复前会400）
+        resp = client.post(f"/api/projects/{pid}/prototype", data={
+            "zip": (io.BytesIO(blob), "roundtrip.zip"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        assert os.path.isfile(os.path.join(root, "prototype", "index.html"))
+
     def test_upload_prototype_macos_finder_zip(self, app):
         """用户报障场景：macOS Finder 压缩的 zip 带 __MACOSX/ 资源目录、
         .DS_Store 与 ._ 资源 fork 垃圾条目——不得干扰「唯一内容子目录」

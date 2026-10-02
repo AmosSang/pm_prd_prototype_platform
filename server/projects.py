@@ -26,6 +26,7 @@ from flask import Blueprint, jsonify, request, send_file, session
 
 from server.config import (
     PRD_MAX_BYTES,
+    PROTO_MAX_DESCEND,
     PROTO_UNZIP_MAX_BYTES,
     PROTO_UNZIP_MAX_FILES,
     PROTO_ZIP_MAX_BYTES,
@@ -248,25 +249,40 @@ def _top_has_html(d: str) -> bool:
 
 
 def _descend_unique_child(dir_root: str) -> str:
-    """T8.2 智能下钻：zip 根顶层无 html 时进入唯一子目录一层（产品常见
+    """T8.2 智能下钻：zip 根顶层无 html 时进入唯一子目录（产品常见
     打包形态「dist/index.html」「prototype/index.html」）；子目录不唯一
     或子树无 html 则原样返回（由调用方按顶层无 html 报错）。
 
     「唯一」按可见内容目录计——点开头目录（.git 等）不参与计数，
     macOS 垃圾条目已在解压时跳过（__MACOSX/.DS_Store/._* 不会落盘）。
+
+    T12.6 修复：原先只下钻一层，但 export_prototype 导出的包形态是
+    「<slug>-prototype/prototype/index.html」——**两层**。导出的包自己
+    再上传回来会失败（报「未找到 HTML 页面」）。改为逐层下钻（上限
+    PROTO_MAX_DESCEND 层），使导出→上传往返自洽。
     """
     if _top_has_html(dir_root):
         return dir_root
-    children = [
-        c for c in os.listdir(dir_root)
-        if os.path.isdir(os.path.join(dir_root, c)) and not c.startswith(".")
-    ]
-    if len(children) == 1:
-        child = os.path.join(dir_root, children[0])
-        for _dp, _dn, fns in os.walk(child):
-            if any(fn.lower().endswith(".html") for fn in fns):
-                return child
-    return dir_root
+    cur = dir_root
+    for _ in range(PROTO_MAX_DESCEND):
+        children = [
+            c for c in os.listdir(cur)
+            if os.path.isdir(os.path.join(cur, c)) and not c.startswith(".")
+        ]
+        if len(children) != 1:
+            return cur
+        child = os.path.join(cur, children[0])
+        if _top_has_html(child):
+            return child
+        # 该层顶层无 html，但子树里可能有，继续向下（限深，避免深树遍历）
+        if not any(
+            fn.lower().endswith(".html")
+            for _dp, _dn, fns in os.walk(child)
+            for fn in fns
+        ):
+            return cur
+        cur = child
+    return cur
 
 
 @bp.post("/<int:pid>/prototype")
