@@ -43,7 +43,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastmcp import FastMCP  # noqa: E402
-from fastmcp.server.dependencies import get_http_headers  # noqa: E402
+from fastmcp.server.dependencies import get_http_headers, get_http_request  # noqa: E402
 
 from server.config import DATA_DIR, PRD_MAX_BYTES, PROTO_ZIP_MAX_BYTES  # noqa: E402
 from server.mcp_loopback import UPLOAD_TIMEOUT, ApiResult, call_api  # noqa: E402
@@ -103,8 +103,19 @@ MCP_INSTRUCTIONS = """本服务是「产品方案展示平台」的 MCP 接入�
 - 「看看 XX 项目的 PRD / 整体情况 / 对账」→ get_prd_content / get_project_overview / get_reconcile
 - 「把 {目录} 的最新原型传到 {项目}」→ ① 读本机 zip 文件并转 base64；
   ② upload_prototype（需要创建者/协作者权限）。**上传即覆盖旧版本**，
-  调用前必须向用户复述确认。
+  调用前必须向用户复述确认。若本机没有现成 zip、需基于平台现有原型改，
+  先走下面的「AI 改原型闭环」第 1 步。
 - 「更新 XX 项目的 PRD 文档」→ upload_prd（同样为覆盖语义，先复述确认）
+
+## AI 改原型闭环（读 → 改 → 回传 → 评审）
+1. **取源码**：download_prototype → 返回 zip 下载地址与 curl 命令 → 在本机下载解压
+   （包内为 `{slug}-prototype/prototype/…`）。原型动辄数十 MB，**不要试图让本工具
+   直接返回文件内容**。
+2. **改文件**：在本机修改 HTML/CSS。**必须保持 `data-pa` 锚点 ID 不变**——改名或删除
+   会让 PRD↔原型双向联动与锚点对账断裂；新增元素如需联动，先与用户确认锚点命名。
+3. **回传**：upload_prototype（zip 重新打包 → base64 → 传入）。覆盖旧版本，先复述确认。
+4. **评审**：用户在平台评论 → get_all_comments（可带 status="已确认待修改"）→
+   回到第 1 步，形成闭环。
 
 ## 上传覆盖语义（重要）
 - upload_prototype / upload_prd 都是**上传即覆盖**：成功即替换旧版本，
@@ -285,6 +296,26 @@ def _audit(tool: str, bearer: str | None, project_slug: str, size: int | None, o
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
     except Exception as e:  # noqa: BLE001 —— 审计不阻断主流程
         print(f"[mcp] audit log failed: {e}", file=sys.stderr)
+
+
+def _platform_base() -> str:
+    """平台对外基址（MCP 进程独立于 Flask，需自行推导下载直链的 origin）。
+
+    优先级：环境变量 ``PLATFORM_PUBLIC_ORIGIN``（生产推荐显式配置）> 当前 MCP
+    请求的 scheme + Host（Nginx 同域反代时即平台域名）。本地 dev 若 MCP 与
+    Flask 不同端口，需显式配置该变量，否则回落到 MCP 自身地址。
+    """
+    env = (os.environ.get("PLATFORM_PUBLIC_ORIGIN") or "").strip().rstrip("/")
+    if env:
+        return env
+    try:
+        req = get_http_request()
+        host = (req.headers.get("host") or "").strip()
+        if host:
+            return f"{req.url.scheme or 'http'}://{host}"
+    except Exception:  # noqa: BLE001 —— 非 HTTP 上下文（如内存测试）取不到
+        pass
+    return ""
 
 
 def _decode_base64(file_base64: str, limit: int) -> tuple[bytes | None, dict | None]:
@@ -513,6 +544,63 @@ def upload_prd(project: str, file_base64: str, file_name: str = "PRD.md") -> dic
         "file_size": len(raw),
         "note": "已替换旧 PRD 文档",
     }
+
+
+@mcp.tool(name="download_prototype")
+def download_prototype(project: str, base_url: str | None = None, include_token: bool = False) -> dict:
+    """获取项目原型源码（zip）的下载方式——「AI 改原型」闭环的第一步。
+
+    典型流程：本工具取下载命令 → 本机下载解压 → 改 HTML/CSS（**保持 data-pa
+    锚点 ID 不变**，否则 PRD↔原型联动会断）→ upload_prototype 回传（覆盖旧版）。
+
+    为什么不直接返回文件内容：原型常有数十 MB，base64 传输膨胀 33% 且占满
+    上下文；因此返回**下载地址 + 现成 curl 命令**，请在本机执行下载。
+
+    project：项目 slug（project_id）或名称；模糊匹配多命中返回候选，需先确认。
+    base_url：可选，平台基址（如 https://your.domain）；留空按当前连接自动推导。
+    include_token：可选，默认 false——true 时额外返回已填好你当前 Token 的
+      可直接执行命令（便于一步下载；该命令含凭证，请勿写入文件或外传）。
+
+    返回：download_url / api_path / curl 命令 / zip 内目录结构与入口页数量。
+    """
+    bearer = _bearer()
+    p, err = _resolve_project(project, bearer)
+    if err:
+        return err
+    # 先确认有原型内容，避免让 Agent 下载到空包
+    ov = call_api("GET", f"/api/projects/{p['id']}/overview", bearer)
+    if not ov.ok:
+        return _map_api_error(ov, action="读取项目概览")
+    entries = (ov.data or {}).get("proto_entries") or []
+    if not entries:
+        _audit("download_prototype", bearer, str(p.get("project_id")), None, ok=False, error_code="prototype_empty")
+        return _err("prototype_empty", "项目还没有原型内容", "请先上传原型 zip（网页端或 upload_prototype 工具）")
+
+    base = (base_url or _platform_base()).rstrip("/")
+    if not base:
+        return _err(
+            "base_url_unknown", "无法自动确定平台基址",
+            "请显式传入 base_url（如 https://your.domain）；本地自建部署也可用 http://127.0.0.1:8081",
+        )
+    slug = str(p.get("project_id"))
+    file_name = f"{slug}-prototype.zip"
+    api_path = f"/api/projects/{p['id']}/prototype/export"
+    url = f"{base}{api_path}"
+    _audit("download_prototype", bearer, slug, None, ok=True)
+    out = {
+        "project": _project_row(p),
+        "file_name": file_name,
+        "download_url": url,
+        "api_path": api_path,
+        "curl": f"curl -sSL -H 'Authorization: Bearer <你的Token>' -o {file_name} '{url}'",
+        "zip_structure": f"{slug}-prototype/prototype/…（顶层一层，解压不污染工作目录）",
+        "entry_count": len(entries),
+        "entries": entries[:20],
+        "note": "本机执行 curl 下载并解压；改完用 upload_prototype 回传（覆盖旧版本，先向用户复述确认）。PRD 原文用 get_prd_content。",
+    }
+    if include_token and bearer:
+        out["curl_ready"] = f"curl -sSL -H 'Authorization: Bearer {bearer}' -o {file_name} '{url}'"
+    return out
 
 
 def main() -> None:

@@ -19,9 +19,10 @@ import os
 import re
 import secrets
 import shutil
+import tempfile
 import zipfile
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, jsonify, request, send_file, session
 
 from server.config import (
     PRD_MAX_BYTES,
@@ -320,6 +321,63 @@ def upload_prototype(pid: int):
     p.content_updated_at = utcnow_str()
     p.save()
     return jsonify(code=0, data=_project_public(p)), 200
+
+
+@bp.get("/<int:pid>/prototype/export")
+def export_prototype(pid: int):
+    """导出原型 zip（T12.6）：把 prototype/ 打包，供 AI Agent 读源码后改原型。
+
+    权限：任何已登录用户——与 `/proto/` 预览可见性一致（原型对协作方本就可见，
+    打包不扩大暴露面）；Bearer 与 session 等价。
+
+    包结构：`{slug}-prototype/prototype/...`（顶层保留一层，解压不污染工作目录），
+    过滤 `.DS_Store` / `__MACOSX` / `._*` 垃圾条目与软链。解压后可达 300MB，
+    故落临时文件流式返回（不进内存），响应结束即删。
+    """
+    p = Project.get_or_none(Project.id == pid)
+    if not p:
+        return _err("项目不存在", 404)
+    root = _repo_root(p)
+    proto_dir = os.path.join(root, "prototype")
+    if not os.path.isdir(proto_dir):
+        return _err("项目还没有原型内容，请先上传原型 zip", 410)
+
+    prefix = f"{p.project_id}-prototype"
+    tmp = tempfile.NamedTemporaryFile(prefix="ppp-proto-", suffix=".zip", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for dirpath, dirnames, filenames in os.walk(proto_dir):
+                dirnames[:] = [d for d in dirnames if d != "__MACOSX" and not d.startswith(".")]
+                for fn in filenames:
+                    if fn == ".DS_Store" or fn.startswith("._"):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    if os.path.islink(full) or not os.path.isfile(full):
+                        continue
+                    rel = os.path.relpath(full, proto_dir)
+                    zf.write(full, f"{prefix}/prototype/{rel}")
+    except OSError as e:
+        _silent_unlink(tmp_path)
+        return _err(f"打包失败：{e}", 500)
+
+    resp = send_file(
+        tmp_path,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{prefix}.zip",
+    )
+    resp.call_on_close(lambda: _silent_unlink(tmp_path))
+    return resp
+
+
+def _silent_unlink(path: str) -> None:
+    """删临时文件，失败不抛（响应已发出，不能因清理失败影响调用方）。"""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 @bp.post("/<int:pid>/prd")

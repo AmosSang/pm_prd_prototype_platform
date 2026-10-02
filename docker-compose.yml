@@ -35,6 +35,9 @@ services:
       - DATA_DIR=/data
       # base64 大参数上传（SDK 默认 4MiB 不够用，见 docs/poc-report-mcp-upload.md）
       - MCP_MAX_REQUEST_BODY_BYTES=167772160
+      # download_prototype 生成下载直链用的平台基址：留空则按 MCP 请求的
+      # scheme+Host 推导（Nginx 同域反代时即平台域名）；独立域名/端口时显式填
+      - PLATFORM_PUBLIC_ORIGIN=${PLATFORM_PUBLIC_ORIGIN:-}
     ports:
       - "8082:8082"
     volumes:
